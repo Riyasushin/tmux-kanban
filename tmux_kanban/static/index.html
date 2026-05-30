@@ -65,7 +65,7 @@
                     <span class="title" id="panel-title"></span>
                     <button class="term-btn" onclick="copyTmuxBuffer(this)" title="Select text → release mouse → Alt+C to copy">Copy (Mouse Select → Release → Alt+C)</button>
 
-                    <button class="term-btn" onclick="showDraftBox()" title="Draft to terminal (Alt+D)">Draft (Alt+D)</button>
+                    <button class="term-btn" onclick="openNativeTerminal(currentSessionName)" title="Open in iTerm2">Terminal</button>
                     <button class="term-btn" onclick="toggleFullscreen()" title="Fullscreen">&#x26F6;</button>
                     <button class="term-btn term-btn-close" onclick="closeTerminal()" title="Close">&#10005;</button>
                 </div>
@@ -91,7 +91,7 @@
                 <span class="title" id="fs-title"></span>
                 <button class="term-btn" onclick="copyTmuxBuffer(this)" title="Select text → release mouse → Alt+C to copy">Copy (Mouse Select → Release → Alt+C)</button>
 
-                <button class="term-btn" onclick="showDraftBox()" title="Draft to terminal (Alt+D)">Draft (Alt+D)</button>
+                <button class="term-btn" onclick="openNativeTerminal(currentSessionName)" title="Open in iTerm2">Terminal</button>
                 <button class="term-btn" onclick="toggleFullscreen()" title="Side panel">&#x25a3;</button>
                 <button class="term-btn term-btn-close" onclick="closeTerminal()">&#10005;</button>
             </div>

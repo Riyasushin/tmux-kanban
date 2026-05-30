@@ -2307,6 +2307,15 @@ function initTerminal(bodyEl, sessionName) {
     term.focus();
 }
 
+async function openNativeTerminal(sessionName) {
+    if (!sessionName) return;
+    try {
+        await authFetch(`/api/sessions/${encodeURIComponent(sessionName)}/open-terminal`, { method: 'POST' });
+    } catch (e) {
+        if (e.message !== 'Unauthorized') alert('Failed to open terminal: ' + e.message);
+    }
+}
+
 function toggleFullscreen() {
     if (!currentSessionName) return;
 

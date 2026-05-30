@@ -9,6 +9,7 @@ import secrets
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 
@@ -761,6 +762,35 @@ async def clear_attention(name: str):
         info.pop("attentionMessage", None)
         info.pop("attentionAt", None)
         save_config(config)
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{name}/open-terminal")
+async def open_native_terminal(name: str):
+    """Open a native terminal window attached to this tmux session."""
+    platsys = sys.platform
+    if platsys == "darwin":
+        script = f"#!/bin/bash\nexec tmux attach -t {name}\n"
+        script_path = f"/tmp/tmux-kanban-attach-{name}.command"
+        with open(script_path, "w") as f:
+            f.write(script)
+        os.chmod(script_path, 0o755)
+        subprocess.run(["open", script_path], timeout=3)
+    elif platsys.startswith("linux"):
+        for term in ["gnome-terminal", "xterm", "konsole", "alacritty", "kitty"]:
+            r = subprocess.run(["which", term], capture_output=True, text=True, timeout=2)
+            if r.returncode == 0:
+                if term == "gnome-terminal":
+                    subprocess.Popen([term, "--", "tmux", "attach", "-t", name])
+                elif term == "kitty":
+                    subprocess.Popen([term, "tmux", "attach", "-t", name])
+                else:
+                    subprocess.Popen([term, "-e", f"tmux attach -t {name}"])
+                break
+        else:
+            raise HTTPException(status_code=500, detail="No terminal emulator found")
+    else:
+        raise HTTPException(status_code=500, detail=f"Unsupported platform: {platsys}")
     return {"ok": True}
 
 
