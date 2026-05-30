@@ -1006,21 +1006,32 @@ async def browse_dir(path: str = ""):
     return {"path": display_path, "parent": display_parent, "dirs": dirs}
 
 
+_remote_home_cache: dict[str, str] = {}
+
+def _remote_home(ssh_host: str) -> str:
+    """Get remote $HOME via SSH, cached per host."""
+    if ssh_host in _remote_home_cache:
+        return _remote_home_cache[ssh_host]
+    r = subprocess.run(
+        ["ssh", ssh_host, "echo", "$HOME"],
+        capture_output=True, text=True, timeout=5,
+    )
+    home = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "/home"
+    _remote_home_cache[ssh_host] = home
+    return home
+
+
 @app.get("/api/remote-browse")
 async def remote_browse_dir(ssh_host: str = "", path: str = ""):
     """List remote directories via SSH."""
     if not ssh_host:
         raise HTTPException(status_code=400, detail="ssh_host is required")
     remote_path = path or "~"
-    # Replace ~ with $HOME so the remote shell expands it
-    if remote_path == "~":
-        remote_path = '"$HOME"'
-    elif remote_path.startswith("~/"):
-        remote_path = '"$HOME/' + remote_path[2:] + '"'
-    else:
-        remote_path = shlex.quote(remote_path)
+    if remote_path.startswith("~"):
+        home = _remote_home(ssh_host)
+        remote_path = home + remote_path[1:]
     r = subprocess.run(
-        ["ssh", ssh_host, "bash", "-c", f"ls -1pF -- {remote_path}"],
+        ["ssh", ssh_host, "ls", "-1pF", "--", remote_path],
         capture_output=True, text=True, timeout=10,
     )
     if r.returncode != 0:
@@ -1044,9 +1055,11 @@ async def remote_path_complete(ssh_host: str = "", q: str = ""):
     if not ssh_host:
         return {"completions": []}
     remote_q = q or "~"
-    script = f'ls -1d {remote_q}* 2>/dev/null | head -12'
+    if remote_q.startswith("~"):
+        home = _remote_home(ssh_host)
+        remote_q = home + remote_q[1:]
     r = subprocess.run(
-        ["ssh", ssh_host, script],
+        ["ssh", ssh_host, "bash", "-c", f"ls -1d -- {shlex.quote(remote_q)}* 2>/dev/null | head -12"],
         capture_output=True, text=True, timeout=10,
     )
     results = []
@@ -1055,7 +1068,7 @@ async def remote_path_complete(ssh_host: str = "", q: str = ""):
         if not line:
             continue
         r2 = subprocess.run(
-            ["ssh", ssh_host, "bash", "-c", f"test -d '{line}'"],
+            ["ssh", ssh_host, "test", "-d", line],
             capture_output=True, timeout=5,
         )
         if r2.returncode == 0:
