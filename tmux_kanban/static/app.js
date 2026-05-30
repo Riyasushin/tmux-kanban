@@ -1501,6 +1501,16 @@ function showCreateSession() {
             <label>Description (optional)</label>
             <input type="text" id="new-sess-desc" placeholder="What will this session do?">
         </div>
+        <div class="ss-row">
+            <div class="ss-field">
+                <label>SSH Host (for remote sessions)</label>
+                <input type="text" id="new-sess-ssh-host" placeholder="user@host" value="${escAttr(_newSessFormCache.sshHost || '')}">
+            </div>
+            <div class="ss-field">
+                <label>SSH CWD (remote workdir)</label>
+                <input type="text" id="new-sess-ssh-cwd" placeholder="~/project" value="${escAttr(_newSessFormCache.sshCwd || '')}">
+            </div>
+        </div>
         <div class="modal-field cwd-field">
             <label>Working Directory <span id="git-indicator"></span></label>
             <div class="cwd-input-row">
@@ -1711,6 +1721,8 @@ async function createSession() {
     const wtBranch = wtSkip ? '' : document.getElementById('new-sess-wt').value.trim();
     const command = document.getElementById('new-sess-cmd').value.trim() || null;
     const description = document.getElementById('new-sess-desc')?.value.trim() || null;
+    const sshHost = document.getElementById('new-sess-ssh-host')?.value.trim() || null;
+    const sshCwd = document.getElementById('new-sess-ssh-cwd')?.value.trim() || null;
 
     // Save the agent command for next time
     if (selectedAgentType !== 'tmux' && command) {
@@ -1733,6 +1745,8 @@ async function createSession() {
                     project,
                     command,
                     description,
+                    sshHost,
+                    sshCwd,
                 }),
             });
             await apiCheck(res);
@@ -1740,7 +1754,7 @@ async function createSession() {
             const res = await authFetch('/api/sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, cwd, project, command, description }),
+                body: JSON.stringify({ name, cwd, project, command, description, sshHost, sshCwd }),
             });
             await apiCheck(res);
         }
