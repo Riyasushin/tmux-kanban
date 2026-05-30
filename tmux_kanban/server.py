@@ -600,34 +600,15 @@ def save_config(config):
         raise
 
 
-def _get_session_ssh(session_name: str):
-    """Return (ssh_host, ssh_cwd) for a session, or ("", "")."""
-    config = load_config()
-    info = config.get("sessionInfo", {}).get(session_name, {})
-    return info.get("sshHost", ""), info.get("sshCwd", "")
-
-
-def _tmux_for(session_name: str, *args, ssh_host: str = "", timeout: int = 5):
-    """Run tmux command locally, or via SSH if session has sshHost configured."""
-    if not ssh_host:
-        ssh_host, _ = _get_session_ssh(session_name)
-    if ssh_host:
-        return subprocess.run(["ssh", ssh_host, "tmux", *args],
-                              capture_output=True, text=True, timeout=timeout)
-    return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=timeout)
-
-
-def _ensure_session(name: str, cwd: str = "~", ssh_host: str = "", ssh_cwd: str = ""):
-    """Create tmux session if it doesn't exist, locally or via SSH."""
-    if not ssh_host:
-        ssh_host, ssh_cwd_cfg = _get_session_ssh(name)
-        if ssh_host and not ssh_cwd:
-            ssh_cwd = ssh_cwd_cfg
-    expanded = os.path.expanduser(cwd) if not ssh_host else (ssh_cwd or cwd)
-    if not ssh_host and not os.path.isdir(expanded):
+def _ensure_session(name: str, cwd: str = "~"):
+    """Create local tmux session if it doesn't exist."""
+    expanded = os.path.expanduser(cwd)
+    if not os.path.isdir(expanded):
         expanded = os.path.expanduser("~")
-    result = _tmux_for(name, "new-session", "-d", "-s", name, "-c", str(expanded),
-                       ssh_host=ssh_host, timeout=10)
+    result = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", name, "-c", expanded],
+        capture_output=True, text=True, timeout=10,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"tmux new-session failed: {result.stderr.strip()}")
 
@@ -1152,12 +1133,16 @@ async def create_session(body: SessionCreate):
     if not os.path.isdir(cwd):
         cwd = os.path.expanduser("~")
     try:
-        _ensure_session(body.name, cwd, ssh_host=body.sshHost or "", ssh_cwd=body.sshCwd or "")
+        _ensure_session(body.name, cwd)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    # If SSH host is set, send SSH command into the local tmux session
+    if body.sshHost:
+        remote_cwd = body.sshCwd or "~"
+        ssh_cmd = f"ssh -t {body.sshHost} \"cd {remote_cwd} && exec bash\""
+        run_tmux("send-keys", "-t", body.name, ssh_cmd, "Enter")
     if body.command:
-        _tmux_for(body.name, "send-keys", "-t", body.name, body.command, "Enter",
-                  ssh_host=body.sshHost or "")
+        run_tmux("send-keys", "-t", body.name, body.command, "Enter")
     async with _config_lock:
         config = load_config()
         info = {"cwd": to_home_display(cwd)}
@@ -1250,8 +1235,7 @@ async def create_session_with_worktree(body: SessionWithWorktree):
             msg += f" (rollback also failed: {rb.stderr.strip()})"
         raise HTTPException(status_code=500, detail=msg)
     if body.command:
-        _tmux_for(body.name, "send-keys", "-t", body.name, body.command, "Enter",
-                  ssh_host=body.sshHost or "")
+        run_tmux("send-keys", "-t", body.name, body.command, "Enter")
     async with _config_lock:
         config = load_config()
         info = {"cwd": display_path}
@@ -1283,7 +1267,7 @@ async def rename_session(name: str, body: SessionRename):
         if body.new_name != name and (body.new_name in config.get("sessionInfo", {}) or body.new_name in config.get("sessionStatus", {})):
             raise HTTPException(status_code=400, detail=f"Session '{body.new_name}' already exists")
         # Try renaming live tmux session (may not exist if dead)
-        _tmux_for(name, "rename-session", "-t", name, body.new_name)
+        run_tmux("rename-session", "-t", name, body.new_name)
         if name in config["sessionStatus"]:
             config["sessionStatus"][body.new_name] = config["sessionStatus"].pop(name)
         if name in config["sessionInfo"]:
@@ -1301,9 +1285,7 @@ class CommandSend(BaseModel):
 @app.post("/api/sessions/{name}/command")
 async def send_command(name: str, body: CommandSend):
     """Send a command to a running tmux session."""
-    result = _tmux_for(name, "send-keys", "-t", name, body.command, "Enter")
-    if result.returncode != 0:
-        raise HTTPException(status_code=400, detail=result.stderr.strip() or "session not running")
+    run_tmux("send-keys", "-t", name, body.command, "Enter")
     return {"ok": True}
 
 
@@ -1342,7 +1324,7 @@ async def delete_session(name: str, force: bool = False):
             if parent != wt_base and os.path.isdir(parent) and not os.listdir(parent):
                 os.rmdir(parent)
         # Kill tmux session only after all checks pass
-        _tmux_for(name, "kill-session", "-t", name)
+        run_tmux("kill-session", "-t", name)
         config["sessionInfo"].pop(name, None)
         config["sessionStatus"].pop(name, None)
         for p in config["projects"]:
@@ -1354,9 +1336,9 @@ async def delete_session(name: str, force: bool = False):
 @app.post("/api/sessions/{name}/scroll-bottom")
 async def scroll_bottom(name: str):
     """Exit copy-mode if active (jumps to bottom), then refresh."""
-    in_mode = _tmux_for(name, "display-message", "-t", name, "-p", "#{pane_in_mode}").stdout
+    in_mode = run_tmux("display-message", "-t", name, "-p", "#{pane_in_mode}")
     if in_mode.strip() == "1":
-        _tmux_for(name, "send-keys", "-t", name, "q")
+        run_tmux("send-keys", "-t", name, "q")
     return {"ok": True}
 
 
@@ -1442,7 +1424,10 @@ async def update_app(body: UpdateRequest | None = None):
 
 @app.post("/api/sessions/{name}/stop")
 async def stop_session(name: str):
-    result = _tmux_for(name, "kill-session", "-t", name)
+    result = subprocess.run(
+        ["tmux", "kill-session", "-t", name],
+        capture_output=True, text=True, timeout=5,
+    )
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=result.stderr.strip())
     return {"ok": True}
@@ -1454,20 +1439,23 @@ async def start_session(name: str):
     info = config.get("sessionInfo", {}).get(name, {})
     cwd = info.get("cwd", "~")
     ssh_host = info.get("sshHost", "")
-    # If the saved cwd no longer exists, fall back to ~ and fix config (local only)
-    if not ssh_host:
-        expanded = os.path.expanduser(cwd)
-        if not os.path.isdir(expanded):
-            cwd = "~"
-            async with _config_lock:
-                config = load_config()
-                if name in config["sessionInfo"]:
-                    config["sessionInfo"][name]["cwd"] = "~"
-                    save_config(config)
+    ssh_cwd = info.get("sshCwd", "")
+    expanded = os.path.expanduser(cwd)
+    if not os.path.isdir(expanded):
+        cwd = "~"
+        async with _config_lock:
+            config = load_config()
+            if name in config["sessionInfo"]:
+                config["sessionInfo"][name]["cwd"] = "~"
+                save_config(config)
     try:
         _ensure_session(name, cwd)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if ssh_host:
+        remote_cwd = ssh_cwd or "~"
+        ssh_cmd = f"ssh -t {ssh_host} \"cd {remote_cwd} && exec bash\""
+        run_tmux("send-keys", "-t", name, ssh_cmd, "Enter")
     return {"ok": True}
 
 
@@ -1707,10 +1695,9 @@ async def delete_worktree(session_name: str, branch: str, force: bool = False):
 @app.get("/api/tmux-buffer")
 async def get_tmux_buffer(session: str = ""):
     """Get tmux paste buffer. If empty, fall back to visible pane content."""
-    if session:
-        content = _tmux_for(session, "show-buffer").stdout.strip()
-        if not content:
-            content = _tmux_for(session, "capture-pane", "-t", session, "-p").stdout.strip()
+    content = run_tmux("show-buffer")
+    if not content and session:
+        content = run_tmux("capture-pane", "-t", session, "-p")
     else:
         content = run_tmux("show-buffer")
     return {"content": content}
