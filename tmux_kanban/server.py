@@ -6,6 +6,7 @@ import os
 import pty
 import re
 import secrets
+import shlex
 import signal
 import struct
 import subprocess
@@ -1012,7 +1013,7 @@ async def remote_browse_dir(ssh_host: str = "", path: str = ""):
         raise HTTPException(status_code=400, detail="ssh_host is required")
     remote_path = path or "~"
     r = subprocess.run(
-        ["ssh", ssh_host, "ls", "-1pF", remote_path],
+        ["ssh", ssh_host, "bash", "-c", f"ls -1pF -- {shlex.quote(remote_path)}"],
         capture_output=True, text=True, timeout=10,
     )
     if r.returncode != 0:
@@ -1047,7 +1048,7 @@ async def remote_path_complete(ssh_host: str = "", q: str = ""):
         if not line:
             continue
         r2 = subprocess.run(
-            ["ssh", ssh_host, "test", "-d", line],
+            ["ssh", ssh_host, "bash", "-c", f"test -d '{line}'"],
             capture_output=True, timeout=5,
         )
         if r2.returncode == 0:
