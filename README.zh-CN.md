@@ -126,6 +126,113 @@ tmux-kanban
 
 ---
 
+## 🔔 Agent 关注通知
+
+当 AI coding agent（OpenCode、Claude Code、Kimi、Codex）需要你的批准时，tmux-kanban 会高亮对应 session 卡片，让你知道哪个 agent 需要你。
+
+### 原理
+
+Agent hook 调用 `~/.tmux-kanban/alert-agent-needs-you.sh`（首次启动 `tmux-kanban` 时自动部署）。脚本自动检测当前 tmux session 名，通过专用的 `agent_token` 调用 kanban API。
+
+```
+Agent 需要批准
+  → hook 触发 alert-agent-needs-you.sh
+  → PUT /api/sessions/{name}/attention
+  → 看板卡片橙色高亮
+  → 你点击卡片 → 终端打开 → 手动审批
+  → 点击 "Done" → 高亮清除
+```
+
+**Tailscale / 远程服务器**：在 agent 环境中设置 `TMUX_KANBAN_HOST=100.x.x.x`。脚本默认使用 `127.0.0.1:59235`。
+
+### OpenCode
+
+复制 plugin 到全局 OpenCode 插件目录：
+
+```bash
+cp tmux_kanban/static/tmux-kanban-plugin.js ~/.config/opencode/plugins/tmux-kanban.js
+```
+
+或者放到项目目录 `.opencode/plugins/tmux-kanban.js`。
+
+重启 OpenCode，插件即生效。触发时机：
+- `permission.asked` — 任何权限提示（bash、edit、read 等）
+- `session.idle` — 会话空闲
+- `session.error` — agent 出错
+
+插件用 `$`（Bun shell）调用 `alert-agent-needs-you.sh`。脚本通过 `tmux display-message -p '#S'` 自动检测 tmux session 名，本地使用无需额外配置。
+
+远程 kanban 访问时，在 shell profile（`.zshrc`/`.bashrc`）中设置：
+```bash
+export TMUX_KANBAN_HOST=100.xxx.xxx.xxx
+```
+
+### Claude Code
+
+在 `~/.claude/settings.json` 中添加：
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "~/.tmux-kanban/alert-agent-needs-you.sh 'Claude Code 需要批准'"
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "needs_approval",
+        "command": "~/.tmux-kanban/alert-agent-needs-you.sh 'Claude Code 需要你的批准'"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "~/.tmux-kanban/alert-agent-needs-you.sh 'Claude Code 会话结束——请检查'"
+      }
+    ]
+  }
+}
+```
+
+### Kimi CLI
+
+```jsonc
+// ~/.kimi/config.json
+{
+  "hooks": {
+    "on_confirm": [{
+      "command": "bash ~/.tmux-kanban/alert-agent-needs-you.sh 'Kimi 需要决策'"
+    }]
+  }
+}
+```
+
+### Codex (OpenAI)
+
+```yaml
+# ~/.codex/config.yaml
+hooks:
+  pre_execution:
+    - command: "~/.tmux-kanban/alert-agent-needs-you.sh 'Codex 即将执行'"
+```
+
+### 从任意 agent session 手动触发
+
+```bash
+# 在 tmux session 内执行：
+~/.tmux-kanban/alert-agent-needs-you.sh "PR 已准备好review"
+
+# 或者直接用 curl：
+TOKEN=$(cat ~/.tmux-kanban/agent-token)
+curl -X PUT "http://127.0.0.1:59235/api/sessions/$(tmux display-message -p '#S')/attention" \
+  -H "X-Auth-Token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "测试失败，需要帮助"}'
+```
+
+---
+
 ## 📋 Roadmap
 
 规划中的特性（详见 **[TODO.md](TODO.md)**）：

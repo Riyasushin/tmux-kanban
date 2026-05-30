@@ -167,7 +167,7 @@ Agent needs approval
 Copy the plugin to your global OpenCode plugins directory:
 
 ```bash
-cp ~/Applications/tmux-kanban/tmux_kanban/static/tmux-kanban-plugin.js ~/.config/opencode/plugins/tmux-kanban.js
+cp tmux_kanban/static/tmux-kanban-plugin.js ~/.config/opencode/plugins/tmux-kanban.js
 ```
 
 Or for a single project, place it at `.opencode/plugins/tmux-kanban.js`.
@@ -177,16 +177,11 @@ Restart OpenCode and the plugin is active. It fires on:
 - `session.idle` — round complete
 - `session.error` — agent error
 
-**Tailscale**: add to `~/.config/opencode/opencode.json`:
+The plugin uses the `$` Bun shell to call `alert-agent-needs-you.sh`. The script auto-detects your tmux session name via `tmux display-message -p '#S'`. No extra configuration needed for local use.
 
-```json
-{
-  "shell": {
-    "env": {
-      "TMUX_KANBAN_HOST": "100.xxx.xxx.xxx"
-    }
-  }
-}
+For remote kanban access, set `TMUX_KANBAN_HOST` in your shell profile (`.zshrc`/`.bashrc`):
+```bash
+export TMUX_KANBAN_HOST=100.xxx.xxx.xxx
 ```
 
 ### Claude Code
