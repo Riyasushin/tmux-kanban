@@ -1139,7 +1139,7 @@ async def create_session(body: SessionCreate):
     # If SSH host is set, send SSH command into the local tmux session
     if body.sshHost:
         remote_cwd = body.sshCwd or "~"
-        ssh_cmd = f"ssh -t {body.sshHost} \"cd {remote_cwd} && exec bash\""
+        ssh_cmd = f"ssh -t {body.sshHost} \"cd {remote_cwd} && tmux new-session -A -s {body.name}\""
         run_tmux("send-keys", "-t", body.name, ssh_cmd, "Enter")
     if body.command:
         run_tmux("send-keys", "-t", body.name, body.command, "Enter")
@@ -1454,7 +1454,7 @@ async def start_session(name: str):
         raise HTTPException(status_code=500, detail=str(e))
     if ssh_host:
         remote_cwd = ssh_cwd or "~"
-        ssh_cmd = f"ssh -t {ssh_host} \"cd {remote_cwd} && exec bash\""
+        ssh_cmd = f"ssh -t {ssh_host} \"cd {remote_cwd} && tmux new-session -A -s {name}\""
         run_tmux("send-keys", "-t", name, ssh_cmd, "Enter")
     return {"ok": True}
 
