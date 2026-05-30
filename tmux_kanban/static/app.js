@@ -1767,10 +1767,11 @@ async function openRemoteBrowser() {
         return;
     }
     document.getElementById('file-browser').style.display = 'none';
-    const sshHost = document.getElementById('new-sess-ssh-host').value.trim();
-    if (!sshHost) { alert('Enter SSH Host first'); return; }
-    const input = document.getElementById('new-sess-ssh-cwd');
-    const startPath = input.value || '~';
+    const sshEl = document.getElementById('new-sess-ssh-host');
+    const sshHost = sshEl ? sshEl.value.trim() : '';
+    if (!sshHost) { alert('Select an SSH host first'); return; }
+    const input = document.getElementById('new-sess-cwd');
+    const startPath = input ? (input.value || '~') : '~';
     await loadRemoteBrowserDir(sshHost, startPath);
     fb.style.display = 'block';
 }
@@ -1803,7 +1804,8 @@ async function loadRemoteBrowserDir(sshHost, path) {
 }
 
 function selectRemoteBrowserPath(path) {
-    document.getElementById('new-sess-ssh-cwd').value = path;
+    const input = document.getElementById('new-sess-cwd');
+    if (input) input.value = path;
     document.getElementById('remote-file-browser').style.display = 'none';
 }
 
