@@ -1055,6 +1055,49 @@ async def remote_path_complete(ssh_host: str = "", q: str = ""):
     return {"completions": results}
 
 
+@app.get("/api/ssh-hosts")
+async def list_ssh_hosts():
+    """Parse ~/.ssh/config and return available hosts."""
+    ssh_config = os.path.expanduser("~/.ssh/config")
+    hosts = []
+    if os.path.isfile(ssh_config):
+        try:
+            with open(ssh_config) as f:
+                current = {"host": "", "hostname": "", "user": ""}
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    key = parts[0].lower()
+                    if key == "host":
+                        if current["host"]:
+                            hosts.append({
+                                "host": current["host"],
+                                "hostname": current["hostname"] or current["host"],
+                                "user": current["user"] or os.environ.get("USER", ""),
+                            })
+                        current = {"host": parts[1], "hostname": "", "user": ""}
+                        for extra in parts[2:]:
+                            if extra and extra != parts[1]:
+                                pass  # ignore multi-host patterns for simplicity
+                    elif key == "hostname" and current["host"]:
+                        current["hostname"] = parts[1]
+                    elif key == "user" and current["host"]:
+                        current["user"] = parts[1]
+                if current["host"]:
+                    hosts.append({
+                        "host": current["host"],
+                        "hostname": current["hostname"] or current["host"],
+                        "user": current["user"] or os.environ.get("USER", ""),
+                    })
+        except Exception:
+            pass
+    return {"hosts": hosts}
+
+
 @app.get("/api/check-git")
 async def check_git_path(path: str = "~"):
     """Check if a path is a git repo, return repo name and default branch."""

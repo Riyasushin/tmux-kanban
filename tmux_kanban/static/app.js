@@ -1461,10 +1461,11 @@ let _newSessFormCache = {}; // remember form values across open/close
 
 function _saveNewSessForm() {
     const name = document.getElementById('new-sess-name');
-    const cwd = document.getElementById('new-sess-cwd');
+    const cwd = document.getElementById('new-sess-cwd') || document.getElementById('new-sess-cwd-local');
     const desc = document.getElementById('new-sess-desc');
     const cmd = document.getElementById('new-sess-cmd');
     const proj = document.getElementById('new-sess-project');
+    const ssh = document.getElementById('new-sess-ssh-host');
     _newSessFormCache = {
         name: name?.value || '',
         cwd: cwd?.value || '',
@@ -1472,12 +1473,15 @@ function _saveNewSessForm() {
         cmd: cmd?.value || '',
         project: proj?.value || '',
         agentType: selectedAgentType || 'tmux',
+        sshHost: ssh?.value || _newSessFormCache.sshHost || '',
+        remoteMode: _newSessFormCache.remoteMode || false,
     };
 }
 
-function showCreateSession() {
+async function showCreateSession() {
     newSessGitInfo = null;
     selectedAgentType = _newSessFormCache.agentType || 'tmux';
+    const remoteMode = _newSessFormCache.remoteMode || false;
     const projOptions = configData.projects.map(p =>
         `<option value="${esc(p.name)}" ${p.name === selectedProject ? 'selected' : ''}>${esc(p.name)}</option>`
     ).join('');
@@ -1485,6 +1489,18 @@ function showCreateSession() {
     const agentBtns = Object.entries(AGENT_TYPES).map(([key, val]) =>
         `<button type="button" class="agent-btn ${key === selectedAgentType ? 'active' : ''}" data-agent="${key}" onclick="selectAgentType('${key}')">${val.label}</button>`
     ).join('');
+
+    let sshHostOptions = '';
+    try {
+        const r = await authFetch('/api/ssh-hosts');
+        const hosts = (await r.json()).hosts || [];
+        sshHostOptions = hosts.map(h => `<option value="${escAttr(h.host)}" ${_newSessFormCache.sshHost === h.host ? 'selected' : ''}>${esc(h.host)} (${esc(h.user)}@${esc(h.hostname)})</option>`).join('');
+    } catch (_) {}
+
+    const localActive = remoteMode ? '' : 'active';
+    const remoteActive = remoteMode ? 'active' : '';
+    const remoteDisplay = remoteMode ? '' : 'style="display:none"';
+    const localDisplay = remoteMode ? 'style="display:none"' : '';
 
     const modal = document.getElementById('modal');
     modal.innerHTML = `
@@ -1501,27 +1517,32 @@ function showCreateSession() {
             <label>Description (optional)</label>
             <input type="text" id="new-sess-desc" placeholder="What will this session do?">
         </div>
-        <div class="ss-row">
-            <div class="ss-field">
-                <label>SSH Host (for remote sessions)</label>
-                <input type="text" id="new-sess-ssh-host" placeholder="user@host" value="${escAttr(_newSessFormCache.sshHost || '')}">
+        <div class="modal-field cwd-field">
+            <label>Working Directory <span id="git-indicator"></span></label>
+            <div class="mode-toggle-row">
+                <button type="button" id="mode-local-btn" class="mode-toggle-btn ${localActive}" onclick="switchCwdMode(false)">Local</button>
+                <button type="button" id="mode-remote-btn" class="mode-toggle-btn ${remoteActive}" onclick="switchCwdMode(true)">Remote</button>
             </div>
-            <div class="ss-field">
-                <label>SSH CWD (remote workdir)</label>
+            <div id="cwd-remote-row" ${remoteDisplay}>
                 <div class="cwd-input-row">
-                    <input type="text" id="new-sess-ssh-cwd" placeholder="~/project" value="${escAttr(_newSessFormCache.sshCwd || '')}">
+                    <select id="new-sess-ssh-host" class="modal-select" style="flex:1">
+                        <option value="">Choose SSH host...</option>
+                        ${sshHostOptions}
+                    </select>
+                </div>
+                <div class="cwd-input-row" style="margin-top:6px">
+                    <input type="text" id="new-sess-cwd" placeholder="~/project" value="${escAttr(_newSessFormCache.cwd || '')}">
                     <button type="button" class="cwd-browse-btn" onclick="openRemoteBrowser()">Browse</button>
                 </div>
             </div>
-        </div>
-        <div class="modal-field cwd-field">
-            <label>Working Directory <span id="git-indicator"></span></label>
-            <div class="cwd-input-row">
-                <input type="text" id="new-sess-cwd" placeholder="${escAttr(configData.home || '')}" value="${configData.home || ''}"
-                       oninput="onCwdInput(event); checkCwdGit()" onkeydown="onCwdKeydown(event)">
-                <button type="button" class="cwd-history-btn" onclick="showAutocompleteDropdown(document.getElementById('new-sess-cwd'))" title="Show subdirectories">&#9662;</button>
-                <button type="button" class="cwd-browse-btn" onclick="openBrowser()">Browse</button>
-                <button type="button" class="cwd-recent-btn" onclick="showRecentDropdown(document.getElementById('new-sess-cwd'))" title="Recent paths">Recent</button>
+            <div id="cwd-local-row" ${localDisplay}>
+                <div class="cwd-input-row">
+                    <input type="text" id="new-sess-cwd-local" placeholder="${escAttr(configData.home || '')}" value="${configData.home || ''}"
+                           oninput="onCwdInput(event); checkCwdGit()" onkeydown="onCwdKeydown(event)">
+                    <button type="button" class="cwd-history-btn" onclick="showAutocompleteDropdown(document.getElementById('new-sess-cwd-local'))" title="Show subdirectories">&#9662;</button>
+                    <button type="button" class="cwd-browse-btn" onclick="openBrowser()">Browse</button>
+                    <button type="button" class="cwd-recent-btn" onclick="showRecentDropdown(document.getElementById('new-sess-cwd-local'))" title="Recent paths">Recent</button>
+                </div>
             </div>
         </div>
         <div class="file-browser" id="file-browser" style="display:none"></div>
@@ -1557,21 +1578,44 @@ function showCreateSession() {
     document.getElementById('modal-overlay').classList.add('active');
     // Restore cached form values
     const c = _newSessFormCache;
-    if (c.name) document.getElementById('new-sess-name').value = c.name;
-    if (c.cwd) document.getElementById('new-sess-cwd').value = c.cwd;
-    if (c.desc) document.getElementById('new-sess-desc').value = c.desc;
-    if (c.cmd) document.getElementById('new-sess-cmd').value = c.cmd;
-    if (c.project) document.getElementById('new-sess-project').value = c.project;
+    if (c.name) {
+        const n = document.getElementById('new-sess-name'); if (n) n.value = c.name;
+    }
+    if (c.desc) {
+        const d = document.getElementById('new-sess-desc'); if (d) d.value = c.desc;
+    }
+    if (c.cmd) {
+        const cm = document.getElementById('new-sess-cmd'); if (cm) cm.value = c.cmd;
+    }
+    if (c.project) {
+        const p = document.getElementById('new-sess-project'); if (p) p.value = c.project;
+    }
+    if (c.cwd) {
+        const cwdEl = document.getElementById('new-sess-cwd') || document.getElementById('new-sess-cwd-local');
+        if (cwdEl) cwdEl.value = c.cwd;
+    }
     // Auto-check whether the initial cwd is a git repo (updates Skip checkbox)
-    checkCwdGit();
+    if (!remoteMode) checkCwdGit();
     setTimeout(() => document.getElementById('new-sess-name')?.focus(), 50);
+}
+
+function switchCwdMode(remote) {
+    _newSessFormCache.remoteMode = remote;
+    // Save current cwd value before re-render
+    const cwdEl = document.getElementById('new-sess-cwd') || document.getElementById('new-sess-cwd-local');
+    if (cwdEl) _newSessFormCache.cwd = cwdEl.value;
+    // Save current ssh host
+    const sshEl = document.getElementById('new-sess-ssh-host');
+    if (sshEl) _newSessFormCache.sshHost = sshEl.value;
+    showCreateSession();
 }
 
 let gitCheckTimer = null;
 function checkCwdGit() {
     clearTimeout(gitCheckTimer);
     gitCheckTimer = setTimeout(async () => {
-        const cwd = document.getElementById('new-sess-cwd').value.trim();
+        const cwdEl = document.getElementById('new-sess-cwd-local');
+        const cwd = cwdEl ? cwdEl.value.trim() : '';
         if (!cwd) {
             updateGitIndicator(false);
             return;
@@ -1676,9 +1720,8 @@ async function openBrowser() {
         fb.style.display = 'none';
         return;
     }
-    const input = document.getElementById('new-sess-cwd');
-    // Empty input -> let backend resolve to home
-    const startPath = input.value || '';
+    const input = document.getElementById('new-sess-cwd-local');
+    const startPath = input ? (input.value || '') : '';
     await loadBrowserDir(startPath);
     fb.style.display = 'block';
 }
@@ -1711,7 +1754,8 @@ async function loadBrowserDir(path) {
 }
 
 function selectBrowserPath(path) {
-    document.getElementById('new-sess-cwd').value = path;
+    const input = document.getElementById('new-sess-cwd-local');
+    if (input) input.value = path;
     document.getElementById('file-browser').style.display = 'none';
     checkCwdGit();
 }
@@ -1766,14 +1810,16 @@ function selectRemoteBrowserPath(path) {
 async function createSession() {
     const name = document.getElementById('new-sess-name').value.trim();
     if (!name) { alert('Session name is required.'); return; }
-    const cwd = document.getElementById('new-sess-cwd').value.trim() || '~';
+    const remoteMode = _newSessFormCache.remoteMode || false;
+    const sshHost = remoteMode ? (document.getElementById('new-sess-ssh-host')?.value.trim() || null) : null;
+    const cwdEl = remoteMode ? document.getElementById('new-sess-cwd') : document.getElementById('new-sess-cwd-local');
+    const cwd = cwdEl ? (cwdEl.value.trim() || '~') : '~';
     const project = document.getElementById('new-sess-project').value || null;
     const wtSkip = document.getElementById('wt-skip')?.checked;
     const wtBranch = wtSkip ? '' : document.getElementById('new-sess-wt').value.trim();
     const command = document.getElementById('new-sess-cmd').value.trim() || null;
     const description = document.getElementById('new-sess-desc')?.value.trim() || null;
-    const sshHost = document.getElementById('new-sess-ssh-host')?.value.trim() || null;
-    const sshCwd = document.getElementById('new-sess-ssh-cwd')?.value.trim() || null;
+    const sshCwd = remoteMode ? cwd : null;
 
     // Save the agent command for next time
     if (selectedAgentType !== 'tmux' && command) {
