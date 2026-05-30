@@ -600,12 +600,14 @@ function renderSessionCard(sess) {
     const dotClass = !alive ? 'dot-stopped' : (needsAttention ? 'dot-attention' : (isWorking ? 'dot-working' : 'dot-idle'));
     const dotTitle = !alive ? 'Stopped' : (needsAttention ? (sess.attentionMessage || 'Needs your attention') : (isWorking ? 'Working' : 'Idle'));
     const desc = configData.sessionInfo?.[sess.name]?.description || '';
+    const sshHost = configData.sessionInfo?.[sess.name]?.sshHost || '';
 
     return `
     <div class="session-card${deadClass}${attnClass}" data-session="${escAttr(sess.name)}" onclick="openTerminal('${escAttr(sess.name)}', '${escAttr(sess.name)}')">
         <div class="session-card-header">
             <span class="session-dot ${dotClass}" title="${escAttr(dotTitle)}"></span>
             <span class="card-name">${esc(sess.name)}</span>
+            ${sshHost ? `<span class="card-ssh" title="Remote: ${escAttr(sshHost)}">&#8599;</span>` : ''}
             <button class="status-menu-btn" onclick="event.stopPropagation(); showSessionSettings('${escAttr(sess.name)}')">&#9881;</button>
         </div>
         ${desc ? `<div class="card-desc">${esc(desc)}</div>` : ''}
@@ -852,6 +854,20 @@ function showSessionSettings(sessName) {
     ` : '';
 
     const currentDesc = configData.sessionInfo?.[sessName]?.description || '';
+    const sshHost = configData.sessionInfo?.[sessName]?.sshHost || '';
+    const sshCwd = configData.sessionInfo?.[sessName]?.sshCwd || '';
+
+    const sshDisplay = sshHost ? `
+        <div class="ss-row">
+            <div class="ss-field" style="flex:1">
+                <label>SSH</label>
+                <div class="ss-ssh-display">
+                    <span>${esc(sshHost)}</span>
+                    ${sshCwd ? `<span class="ss-ssh-cwd">${esc(sshCwd)}</span>` : ''}
+                </div>
+            </div>
+        </div>
+    ` : '';
 
     const modal = document.getElementById('modal');
     modal.innerHTML = `
@@ -874,6 +890,7 @@ function showSessionSettings(sessName) {
                 </div>
             </div>
         </div>
+        ${sshDisplay}
         <div class="ss-row">
             <div class="ss-field">
                 <label>Status</label>

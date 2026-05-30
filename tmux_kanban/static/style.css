@@ -496,6 +496,12 @@ body.ready { opacity: 1; }
     white-space: nowrap;
     line-height: 1.2;
 }
+.card-ssh {
+    font-size: 13px;
+    color: var(--accent);
+    margin-right: 4px;
+    flex-shrink: 0;
+}
 
 .session-card-body {
     padding: 0 14px 12px;
@@ -570,6 +576,17 @@ body.ready { opacity: 1; }
     border-radius: var(--radius-sm);
     padding: 10px 12px;
     box-shadow: var(--shadow-sm);
+}
+.ss-ssh-display {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    color: var(--accent);
+}
+.ss-ssh-cwd {
+    color: var(--text-low);
 }
 .ss-wt-path {
     flex: 1;
