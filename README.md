@@ -81,6 +81,20 @@ Built-in support for the popular terminal agents — **Claude Code**, **Codex**,
 
 Built-in git **worktree** support, so you can run multiple agents in parallel on the same repo without them stepping on each other.
 
+### 6. Agent Attention (Vibe Island)
+
+When a coding agent needs your approval or hits a blocker, tmux-kanban highlights that session's card on the board. Click it, jump to the terminal, and take action.
+
+**How it works:**
+1. Agent pops up a permission prompt (e.g., "Approve git push?")
+2. A hook fires `alert-agent-needs-you.sh`, which calls the kanban API
+3. The session card gets an orange glow + dot pulse on the kanban board
+4. Topbar shows a red badge with the count of sessions needing attention
+5. You click the card → terminal opens → you approve manually
+6. Click "Done" in the titlebar to clear the attention flag
+
+See **[Agent Attention Setup](#-agent-attention-setup)** below for hook configuration.
+
 ### Point your own agent at this repo to learn more.
 
 
@@ -129,13 +143,125 @@ Running on a remote/shared server, or behind a reverse proxy? See **[Advanced Us
 
 ---
 
+## 🔔 Agent Attention Setup
+
+When a coding agent (OpenCode, Claude Code, Kimi, Codex) asks for your permission, tmux-kanban can highlight the session card so you know which agent needs you.
+
+### How it works
+
+Agent hooks call `~/.tmux-kanban/alert-agent-needs-you.sh` (auto-deployed on first `tmux-kanban` run). The script auto-detects the tmux session name and pings the kanban API with a dedicated `agent_token`.
+
+```
+Agent needs approval
+  → hook fires alert-agent-needs-you.sh
+  → PUT /api/sessions/{name}/attention
+  → card glows orange on kanban board
+  → you click → terminal opens → you approve manually
+  → click "Done" → orange glow clears
+```
+
+**Tailscale / remote server**: set `TMUX_KANBAN_HOST=100.x.x.x` in your agent's environment. The script defaults to `127.0.0.1:59235`.
+
+### OpenCode
+
+Copy the plugin to your global OpenCode plugins directory:
+
+```bash
+cp ~/Applications/tmux-kanban/tmux_kanban/static/tmux-kanban-plugin.js ~/.config/opencode/plugins/tmux-kanban.js
+```
+
+Or for a single project, place it at `.opencode/plugins/tmux-kanban.js`.
+
+Restart OpenCode and the plugin is active. It fires on:
+- `permission.asked` — any permission prompt (bash, edit, read, etc.)
+- `session.idle` — round complete
+- `session.error` — agent error
+
+**Tailscale**: add to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "shell": {
+    "env": {
+      "TMUX_KANBAN_HOST": "100.xxx.xxx.xxx"
+    }
+  }
+}
+```
+
+### Claude Code
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "~/.tmux-kanban/alert-agent-needs-you.sh 'Claude Code needs approval'"
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "needs_approval",
+        "command": "~/.tmux-kanban/alert-agent-needs-you.sh 'Claude Code needs your approval'"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "~/.tmux-kanban/alert-agent-needs-you.sh 'Claude Code round complete — review'"
+      }
+    ]
+  }
+}
+```
+
+### Kimi CLI
+
+```jsonc
+// ~/.kimi/config.json
+{
+  "hooks": {
+    "on_confirm": [{
+      "command": "bash ~/.tmux-kanban/alert-agent-needs-you.sh 'Kimi needs a decision'"
+    }]
+  }
+}
+```
+
+### Codex (OpenAI)
+
+```yaml
+# ~/.codex/config.yaml
+hooks:
+  pre_execution:
+    - command: "~/.tmux-kanban/alert-agent-needs-you.sh 'Codex about to execute'"
+```
+
+### Manual trigger from any agent session
+
+```bash
+# From inside a tmux session:
+~/.tmux-kanban/alert-agent-needs-you.sh "PR ready for review"
+
+# Or via curl directly:
+TOKEN=$(cat ~/.tmux-kanban/agent-token)
+curl -X PUT "http://127.0.0.1:59235/api/sessions/$(tmux display-message -p '#S')/attention" \
+  -H "X-Auth-Token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Need help with failing test"}'
+```
+
+---
+
 ## 📋 Roadmap
 
 Planned features (see **[TODO.md](TODO.md)** for details):
 
 - **Tmux Bridge** — cross-agent messaging across tmux sessions
 - **Team Mode** — multi-agent coordination and division of labor
-- **Agent Skill** — a skill for driving tmux-kanban itself from your coding agent
+- ~~**Agent Attention (Vibe Island)**~~ — ✅ shipped! Agents highlight their own session cards when they need your attention
 - and more
 
 ## License

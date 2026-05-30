@@ -76,12 +76,58 @@ def _save_token_nolock(token: str):
     save_config(config)
 
 
+# ── Agent token (for hooks from inside tmux sessions) ──
+_agent_token: str = ""
+
+
+def _init_agent_token():
+    """Ensure agent-token exists in config and ~/.tmux-kanban/agent-token file."""
+    global _agent_token
+    config = load_config()
+    if "agent_token" not in config:
+        config["agent_token"] = secrets.token_urlsafe(32)
+        save_config(config)
+    _agent_token = config["agent_token"]
+    token_path = os.path.join(KANBAN_DIR, "agent-token")
+    with open(token_path, "w") as f:
+        f.write(_agent_token + "\n")
+    os.chmod(token_path, 0o600)
+
+
+def _write_helper_script():
+    """Deploy alert-agent-needs-you.sh helper to ~/.tmux-kanban/."""
+    script_path = os.path.join(KANBAN_DIR, "alert-agent-needs-you.sh")
+    script = r"""#!/bin/bash
+# Notify tmux-kanban that this session's agent needs your attention.
+MESSAGE="${1:-Needs your attention}"
+HOST="${TMUX_KANBAN_HOST:-127.0.0.1}"
+PORT="${TMUX_KANBAN_PORT:-59235}"
+SESSION="${TMUX_KANBAN_SESSION:-$(tmux display-message -p '#S' 2>/dev/null || echo 'unknown')}"
+TOKEN=$(cat "$HOME/.tmux-kanban/agent-token" 2>/dev/null)
+[ -z "$TOKEN" ] && exit 1
+curl -s -X PUT "http://${HOST}:${PORT}/api/sessions/${SESSION}/attention" \
+    -H "X-Auth-Token: ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "'"${MESSAGE}"'"}' -o /dev/null
+exit 0
+"""
+    with open(script_path, "w") as f:
+        f.write(script)
+    os.chmod(script_path, 0o755)
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         # Always public: static files, index page, auth status, auth login
         if path == "/" or path.startswith("/static") or path in ("/api/auth/status", "/api/auth/login"):
             return await call_next(request)
+        # Agent attention endpoint: uses agent_token (not web auth)
+        if request.method == "PUT" and re.match(r"^/api/sessions/[^/]+/attention$", path):
+            token = request.headers.get("X-Auth-Token", "")
+            if token and token == _agent_token:
+                return await call_next(request)
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
         # Check auth token
         token = request.headers.get("X-Auth-Token", "")
         if not token:
@@ -373,6 +419,8 @@ async def _activity_poll_loop():
 async def start_background_tasks():
     global _setup_secret
     # Control mode connects lazily on first command (needs existing sessions)
+    _init_agent_token()
+    _write_helper_script()
     asyncio.create_task(_activity_poll_loop())
     signal.signal(signal.SIGCHLD, lambda *_: _reap_children())
     # Password setup is now done client-side (no server-generated secrets)
@@ -677,6 +725,41 @@ async def update_sort_order(body: dict):
         for name, idx in order.items():
             if name in config["sessionInfo"]:
                 config["sessionInfo"][name]["sortIndex"] = idx
+        save_config(config)
+    return {"ok": True}
+
+
+class AttentionRequest(BaseModel):
+    message: str = ""
+
+
+@app.put("/api/sessions/{name}/attention")
+async def request_attention(name: str, body: AttentionRequest):
+    """Agent hook calls this to flag 'needs human attention' on a session.
+    Uses agent_token (validated in middleware)."""
+    from datetime import datetime, timezone
+    async with _config_lock:
+        config = load_config()
+        if name not in config.get("sessionInfo", {}):
+            raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
+        config["sessionInfo"][name]["needsAttention"] = True
+        config["sessionInfo"][name]["attentionMessage"] = body.message
+        config["sessionInfo"][name]["attentionAt"] = datetime.now(timezone.utc).isoformat()
+        save_config(config)
+    return {"ok": True}
+
+
+@app.delete("/api/sessions/{name}/attention")
+async def clear_attention(name: str):
+    """User clears the attention flag from Web UI. Requires auth."""
+    async with _config_lock:
+        config = load_config()
+        if name not in config.get("sessionInfo", {}):
+            raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
+        info = config["sessionInfo"][name]
+        info.pop("needsAttention", None)
+        info.pop("attentionMessage", None)
+        info.pop("attentionAt", None)
         save_config(config)
     return {"ok": True}
 
@@ -1298,6 +1381,10 @@ async def get_sessions():
         is_git, git_branch = await asyncio.to_thread(check_git, sess_cwd)
         entry["isGit"] = is_git
         entry["gitBranch"] = git_branch
+        sess_info = config.get("sessionInfo", {}).get(name, {})
+        entry["needsAttention"] = sess_info.get("needsAttention", False)
+        entry["attentionMessage"] = sess_info.get("attentionMessage", "")
+        entry["attentionAt"] = sess_info.get("attentionAt", "")
         result.append(entry)
 
     return {"sessions": result}

@@ -107,6 +107,39 @@ body.ready { opacity: 1; }
 .topbar h1 { font-family: Georgia, 'Times New Roman', serif; font-size: 22px; font-weight: 500; color: var(--text-high); }
 .topbar-stats { display: flex; gap: 16px; margin-left: auto; font-size: 12px; color: var(--text-low); }
 .topbar-stat { display: flex; align-items: center; gap: 5px; }
+.attention-badge {
+    background: var(--danger);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 10px;
+    padding: 1px 8px;
+    min-width: 18px;
+    text-align: center;
+    display: inline-block;
+    line-height: 18px;
+    margin-right: 8px;
+    cursor: pointer;
+    position: relative;
+}
+.attention-badge:hover::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-panel);
+    color: var(--text-high);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 400;
+    white-space: nowrap;
+    z-index: 999;
+    box-shadow: var(--shadow-md);
+    pointer-events: none;
+}
 .dot { width: 7px; height: 7px; border-radius: 50%; }
 .dot-green { background: var(--success); box-shadow: 0 0 6px var(--success); }
 .dot-yellow { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
@@ -405,6 +438,11 @@ body.ready { opacity: 1; }
 
 .session-card-dead { opacity: 0.45; }
 .session-card-dead:hover { opacity: 0.8; }
+.session-card.needs-attention {
+    border-left: 3px solid var(--danger);
+    box-shadow: 0 0 14px var(--danger-dim);
+    background: linear-gradient(90deg, var(--danger-dim) 0%, transparent 40%);
+}
 
 .session-dot {
     width: 9px;
@@ -415,10 +453,16 @@ body.ready { opacity: 1; }
 .dot-idle { background: var(--success); box-shadow: 0 0 6px var(--success); }
 .dot-working { background: var(--warning); box-shadow: 0 0 6px var(--warning); animation: pulse-glow 2s ease-in-out infinite; }
 .dot-stopped { background: var(--text-muted); }
+.dot-attention { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse-glow-danger 1.2s ease-in-out infinite; }
 
 @keyframes pulse-glow {
     0%, 100% { box-shadow: 0 0 4px var(--warning); }
     50% { box-shadow: 0 0 12px var(--warning); }
+}
+
+@keyframes pulse-glow-danger {
+    0%, 100% { box-shadow: 0 0 4px var(--danger); }
+    50% { box-shadow: 0 0 12px var(--danger); }
 }
 
 .git-badge {
@@ -873,6 +917,12 @@ body.ready { opacity: 1; }
 .term-btn:hover { opacity: 0.88; }
 .term-btn-close { }
 .term-btn-close:hover { background: var(--danger); }
+.attention-done-btn {
+    background: var(--success);
+    color: #000;
+    border: none;
+}
+.attention-done-btn:hover { filter: brightness(1.2); }
 .terminal-body { flex: 1; padding: 4px; overflow: hidden; }
 
 /* ── Draft resize handle ── */

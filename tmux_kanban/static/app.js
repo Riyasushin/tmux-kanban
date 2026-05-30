@@ -308,6 +308,15 @@ function updateStats() {
     const totalPanes = vis.reduce((n, s) =>
         n + s.windows.reduce((m, w) => m + w.panes.length, 0), 0);
     document.getElementById('stat-panes').textContent = totalPanes;
+    const badge = document.getElementById('attention-badge');
+    if (badge) {
+        const attnSessions = sessionsData.filter(s => s.needsAttention);
+        const count = attnSessions.length;
+        badge.textContent = count;
+        badge.style.display = count > 0 ? '' : 'none';
+        const names = attnSessions.map(s => s.name);
+        badge.setAttribute('data-tooltip', names.length ? names.join(', ') : '');
+    }
 }
 
 // ── Sidebar ──
@@ -582,18 +591,20 @@ function renderKanban() {
 function renderSessionCard(sess) {
     const alive = sess.alive !== false;
     const paneCount = alive ? sess.windows.reduce((n, w) => n + w.panes.length, 0) : 0;
+    const needsAttention = sess.needsAttention === true;
     const isWorking = sess.active === true;
     const statusText = sess.activityLabel || (!alive ? 'stopped' : (isWorking ? 'working' : 'idle'));
     const cwd = shortenHome(sess.windows[0]?.panes[0]?.cwd || '');
     const deadClass = alive ? '' : ' session-card-dead';
-    const dotClass = !alive ? 'dot-stopped' : (isWorking ? 'dot-working' : 'dot-idle');
-    const dotTitle = !alive ? 'Stopped' : (isWorking ? 'Working' : 'Idle');
+    const attnClass = needsAttention ? ' needs-attention' : '';
+    const dotClass = !alive ? 'dot-stopped' : (needsAttention ? 'dot-attention' : (isWorking ? 'dot-working' : 'dot-idle'));
+    const dotTitle = !alive ? 'Stopped' : (needsAttention ? (sess.attentionMessage || 'Needs your attention') : (isWorking ? 'Working' : 'Idle'));
     const desc = configData.sessionInfo?.[sess.name]?.description || '';
 
     return `
-    <div class="session-card${deadClass}" data-session="${escAttr(sess.name)}" onclick="openTerminal('${escAttr(sess.name)}', '${escAttr(sess.name)}')">
+    <div class="session-card${deadClass}${attnClass}" data-session="${escAttr(sess.name)}" onclick="openTerminal('${escAttr(sess.name)}', '${escAttr(sess.name)}')">
         <div class="session-card-header">
-            <span class="session-dot ${dotClass}" title="${dotTitle}"></span>
+            <span class="session-dot ${dotClass}" title="${escAttr(dotTitle)}"></span>
             <span class="card-name">${esc(sess.name)}</span>
             <button class="status-menu-btn" onclick="event.stopPropagation(); showSessionSettings('${escAttr(sess.name)}')">&#9881;</button>
         </div>
@@ -2130,6 +2141,29 @@ function restoreDraftForSession(sessName) {
     if (taFs) taFs.value = state.text || '';
 }
 
+function _updateAttentionDoneBtn(sessionName) {
+    const sess = sessionsData.find(s => s.needsAttention && s.name === sessionName);
+    const bars = [
+        document.querySelector('#terminal-panel .terminal-titlebar'),
+        document.querySelector('#terminal-overlay .terminal-titlebar'),
+    ].filter(Boolean);
+    bars.forEach(bar => {
+        const old = bar.querySelector('.attention-done-btn');
+        if (old) old.remove();
+        if (!sess) return;
+        const btn = document.createElement('button');
+        btn.className = 'term-btn attention-done-btn';
+        btn.textContent = 'Done';
+        btn.title = sess.attentionMessage || 'Clear attention flag';
+        btn.onclick = async () => {
+            await authFetch(`/api/sessions/${encodeURIComponent(sessionName)}/attention`, { method: 'DELETE' });
+            await fetchAll();
+            _updateAttentionDoneBtn(sessionName);
+        };
+        bar.appendChild(btn);
+    });
+}
+
 function openTerminalInMode(sessionName, label, mode) {
     saveDraftForCurrentSession();
     if (currentWs) { currentWs.close(); currentWs = null; }
@@ -2159,6 +2193,7 @@ function openTerminalInMode(sessionName, label, mode) {
         initTerminal(bodyEl, sessionName);
     }
     restoreDraftForSession(sessionName);
+    _updateAttentionDoneBtn(sessionName);
     const draftId = mode === 'fullscreen' ? 'draft-input-fs' : 'draft-input';
     setTimeout(() => document.getElementById(draftId)?.focus(), 100);
 }
@@ -2188,6 +2223,7 @@ function openTerminal(sessionName, label) {
 
     initTerminal(bodyEl, sessionName);
     restoreDraftForSession(sessionName);
+    _updateAttentionDoneBtn(sessionName);
     setTimeout(() => document.getElementById('draft-input')?.focus(), 100);
 }
 
