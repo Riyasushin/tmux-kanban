@@ -1723,10 +1723,17 @@ async def terminal_ws(websocket: WebSocket, session_name: str):
     info = config.get("sessionInfo", {}).get(session_name, {})
     cwd = info.get("cwd", "~")
     try:
-        ensure_tmux_session(session_name, cwd)
+        created = ensure_tmux_session(session_name, cwd)
     except RuntimeError:
         await websocket.close(code=4002, reason="Failed to create tmux session")
         return
+    # If session was just created and has SSH config, send the SSH command
+    if created:
+        ssh_host = info.get("sshHost", "")
+        if ssh_host:
+            ssh_cwd = info.get("sshCwd", "") or "~"
+            ssh_cmd = f"ssh -t {ssh_host} \"cd {ssh_cwd} && tmux new-session -A -s {session_name}\""
+            run_tmux("send-keys", "-t", session_name, ssh_cmd, "Enter")
 
     # Each WebSocket creates its own PTY → its own tmux client.
     # Mouse tracking: tmux mouse mode + TUI apps prevent xterm.js native selection.
