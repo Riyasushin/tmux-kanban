@@ -1012,8 +1012,15 @@ async def remote_browse_dir(ssh_host: str = "", path: str = ""):
     if not ssh_host:
         raise HTTPException(status_code=400, detail="ssh_host is required")
     remote_path = path or "~"
+    # Replace ~ with $HOME so the remote shell expands it
+    if remote_path == "~":
+        remote_path = '"$HOME"'
+    elif remote_path.startswith("~/"):
+        remote_path = '"$HOME/' + remote_path[2:] + '"'
+    else:
+        remote_path = shlex.quote(remote_path)
     r = subprocess.run(
-        ["ssh", ssh_host, "bash", "-c", f"ls -1pF -- {shlex.quote(remote_path)}"],
+        ["ssh", ssh_host, "bash", "-c", f"ls -1pF -- {remote_path}"],
         capture_output=True, text=True, timeout=10,
     )
     if r.returncode != 0:

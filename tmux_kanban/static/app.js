@@ -1461,7 +1461,10 @@ let _newSessFormCache = {}; // remember form values across open/close
 
 function _saveNewSessForm() {
     const name = document.getElementById('new-sess-name');
-    const cwd = document.getElementById('new-sess-cwd') || document.getElementById('new-sess-cwd-local');
+    const remoteMode = _newSessFormCache.remoteMode || false;
+    const cwd = remoteMode
+        ? document.getElementById('new-sess-cwd')
+        : document.getElementById('new-sess-cwd-local');
     const desc = document.getElementById('new-sess-desc');
     const cmd = document.getElementById('new-sess-cmd');
     const proj = document.getElementById('new-sess-project');
@@ -1473,8 +1476,8 @@ function _saveNewSessForm() {
         cmd: cmd?.value || '',
         project: proj?.value || '',
         agentType: selectedAgentType || 'tmux',
-        sshHost: ssh?.value || _newSessFormCache.sshHost || '',
-        remoteMode: _newSessFormCache.remoteMode || false,
+        sshHost: ssh?.value || '',
+        remoteMode,
     };
 }
 
