@@ -1508,7 +1508,10 @@ function showCreateSession() {
             </div>
             <div class="ss-field">
                 <label>SSH CWD (remote workdir)</label>
-                <input type="text" id="new-sess-ssh-cwd" placeholder="~/project" value="${escAttr(_newSessFormCache.sshCwd || '')}">
+                <div class="cwd-input-row">
+                    <input type="text" id="new-sess-ssh-cwd" placeholder="~/project" value="${escAttr(_newSessFormCache.sshCwd || '')}">
+                    <button type="button" class="cwd-browse-btn" onclick="openRemoteBrowser()">Browse</button>
+                </div>
             </div>
         </div>
         <div class="modal-field cwd-field">
@@ -1522,6 +1525,7 @@ function showCreateSession() {
             </div>
         </div>
         <div class="file-browser" id="file-browser" style="display:none"></div>
+        <div class="file-browser" id="remote-file-browser" style="display:none"></div>
         <div class="modal-field" id="wt-section">
             <label class="wt-label-row">
                 <span>Worktree (git only)</span>
@@ -1710,6 +1714,53 @@ function selectBrowserPath(path) {
     document.getElementById('new-sess-cwd').value = path;
     document.getElementById('file-browser').style.display = 'none';
     checkCwdGit();
+}
+
+async function openRemoteBrowser() {
+    const fb = document.getElementById('remote-file-browser');
+    if (fb.style.display === 'block') {
+        fb.style.display = 'none';
+        return;
+    }
+    document.getElementById('file-browser').style.display = 'none';
+    const sshHost = document.getElementById('new-sess-ssh-host').value.trim();
+    if (!sshHost) { alert('Enter SSH Host first'); return; }
+    const input = document.getElementById('new-sess-ssh-cwd');
+    const startPath = input.value || '~';
+    await loadRemoteBrowserDir(sshHost, startPath);
+    fb.style.display = 'block';
+}
+
+async function loadRemoteBrowserDir(sshHost, path) {
+    const res = await authFetch(`/api/remote-browse?ssh_host=${encodeURIComponent(sshHost)}&path=${encodeURIComponent(path)}`);
+    const data = await res.json();
+    const browser = document.getElementById('remote-file-browser');
+
+    const parentBtn = data.parent
+        ? `<div class="browser-item browser-parent" onclick="loadRemoteBrowserDir('${escAttr(sshHost)}', '${escAttr(data.parent)}')">← ..</div>`
+        : '';
+
+    const dirItems = data.dirs.map(d => {
+        const sep = data.path.endsWith('/') ? '' : '/';
+        const childPath = data.path + sep + d;
+        return `<div class="browser-item browser-dir" onclick="loadRemoteBrowserDir('${escAttr(sshHost)}', '${escAttr(childPath)}')">${esc(d)}/</div>`;
+    }).join('');
+
+    browser.innerHTML = `
+        <div class="browser-header">
+            <span class="browser-path">${esc(data.path)}</span>
+            <button class="btn-primary browser-select-btn" onclick="selectRemoteBrowserPath('${escAttr(data.path)}')">Select This</button>
+        </div>
+        <div class="browser-list">
+            ${parentBtn}
+            ${dirItems || '<div class="browser-empty">No subdirectories</div>'}
+        </div>
+    `;
+}
+
+function selectRemoteBrowserPath(path) {
+    document.getElementById('new-sess-ssh-cwd').value = path;
+    document.getElementById('remote-file-browser').style.display = 'none';
 }
 
 async function createSession() {

@@ -1005,6 +1005,56 @@ async def browse_dir(path: str = ""):
     return {"path": display_path, "parent": display_parent, "dirs": dirs}
 
 
+@app.get("/api/remote-browse")
+async def remote_browse_dir(ssh_host: str = "", path: str = ""):
+    """List remote directories via SSH."""
+    if not ssh_host:
+        raise HTTPException(status_code=400, detail="ssh_host is required")
+    remote_path = path or "~"
+    r = subprocess.run(
+        ["ssh", ssh_host, "ls", "-1pF", remote_path],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        return {"path": remote_path, "parent": None, "dirs": []}
+    dirs = []
+    for line in r.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.endswith("/") or stripped.endswith("@"):
+            name = stripped.rstrip("/").rstrip("@")
+            if name:
+                dirs.append(name)
+    parent = "/" if remote_path == "/" else (remote_path.rsplit("/", 1)[0] or "/")
+    return {"path": remote_path, "parent": parent, "dirs": dirs}
+
+
+@app.get("/api/remote-path-complete")
+async def remote_path_complete(ssh_host: str = "", q: str = ""):
+    """Autocomplete remote path via SSH."""
+    if not ssh_host:
+        return {"completions": []}
+    remote_q = q or "~"
+    script = f'ls -1d {remote_q}* 2>/dev/null | head -12'
+    r = subprocess.run(
+        ["ssh", ssh_host, script],
+        capture_output=True, text=True, timeout=10,
+    )
+    results = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        r2 = subprocess.run(
+            ["ssh", ssh_host, "test", "-d", line],
+            capture_output=True, timeout=5,
+        )
+        if r2.returncode == 0:
+            results.append(line + "/")
+    return {"completions": results}
+
+
 @app.get("/api/check-git")
 async def check_git_path(path: str = "~"):
     """Check if a path is a git repo, return repo name and default branch."""
