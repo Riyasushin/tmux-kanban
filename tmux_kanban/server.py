@@ -698,10 +698,12 @@ async def set_session_status(name: str, body: StatusUpdate):
 class SessionInfoUpdate(BaseModel):
     description: str | None = None
     sortIndex: int | None = None
+    sshHost: str | None = None
+    sshCwd: str | None = None
 
 @app.put("/api/session/{name}/info")
 async def update_session_info(name: str, body: SessionInfoUpdate):
-    """Update session metadata (description, sortIndex)."""
+    """Update session metadata (description, sortIndex, sshHost)."""
     async with _config_lock:
         config = load_config()
         if name not in config["sessionInfo"]:
@@ -711,6 +713,10 @@ async def update_session_info(name: str, body: SessionInfoUpdate):
             info["description"] = body.description
         if body.sortIndex is not None:
             info["sortIndex"] = body.sortIndex
+        if body.sshHost is not None:
+            info["sshHost"] = body.sshHost
+        if body.sshCwd is not None:
+            info["sshCwd"] = body.sshCwd
         save_config(config)
     return {"ok": True}
 
@@ -768,9 +774,20 @@ async def clear_attention(name: str):
 @app.post("/api/sessions/{name}/open-terminal")
 async def open_native_terminal(name: str):
     """Open a native terminal window attached to this tmux session."""
+    config = load_config()
+    info = config.get("sessionInfo", {}).get(name, {})
+    ssh_host = info.get("sshHost", "")
+    ssh_cwd = info.get("sshCwd", "")
+    if ssh_host:
+        if ssh_cwd:
+            cmd = f"cd {ssh_cwd} && tmux attach -t {name}"
+        else:
+            cmd = f"tmux attach -t {name}"
+        script = f"#!/bin/bash\nexec ssh -t {ssh_host} \"{cmd}\"\n"
+    else:
+        script = f"#!/bin/bash\nexec tmux attach -t {name}\n"
     platsys = sys.platform
     if platsys == "darwin":
-        script = f"#!/bin/bash\nexec tmux attach -t {name}\n"
         script_path = f"/tmp/tmux-kanban-attach-{name}.command"
         with open(script_path, "w") as f:
             f.write(script)

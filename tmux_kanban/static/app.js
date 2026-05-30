@@ -852,6 +852,8 @@ function showSessionSettings(sessName) {
     ` : '';
 
     const currentDesc = configData.sessionInfo?.[sessName]?.description || '';
+    const currentSshHost = configData.sessionInfo?.[sessName]?.sshHost || '';
+    const currentSshCwd = configData.sessionInfo?.[sessName]?.sshCwd || '';
 
     const modal = document.getElementById('modal');
     modal.innerHTML = `
@@ -873,6 +875,21 @@ function showSessionSettings(sessName) {
                     <button class="btn-primary" onclick="ssUpdateDesc('${escAttr(sessName)}')">Save</button>
                 </div>
             </div>
+        </div>
+        <div class="ss-row">
+            <div class="ss-field">
+                <label>SSH Host</label>
+                <div class="ss-inline">
+                    <input type="text" id="ss-ssh-host" value="${escAttr(currentSshHost)}" placeholder="user@host">
+                </div>
+            </div>
+            <div class="ss-field">
+                <label>SSH CWD</label>
+                <div class="ss-inline">
+                    <input type="text" id="ss-ssh-cwd" value="${escAttr(currentSshCwd)}" placeholder="~/project">
+                </div>
+            </div>
+            <button class="btn-primary" onclick="ssUpdateSsh('${escAttr(sessName)}')">Save SSH</button>
         </div>
         <div class="ss-row">
             <div class="ss-field">
@@ -934,6 +951,21 @@ async function ssUpdateDesc(sessName) {
         if (!configData.sessionInfo[sessName]) configData.sessionInfo[sessName] = {};
         configData.sessionInfo[sessName].description = desc;
         renderKanban();
+    } catch (e) { if (e.message !== 'Unauthorized') alert(e.message); }
+}
+
+async function ssUpdateSsh(sessName) {
+    const sshHost = document.getElementById('ss-ssh-host').value.trim();
+    const sshCwd = document.getElementById('ss-ssh-cwd').value.trim();
+    try {
+        await apiCheck(await authFetch(`/api/session/${encodeURIComponent(sessName)}/info`, {
+            method: 'PUT',
+            body: JSON.stringify({ sshHost, sshCwd }),
+        }));
+        if (!configData.sessionInfo) configData.sessionInfo = {};
+        if (!configData.sessionInfo[sessName]) configData.sessionInfo[sessName] = {};
+        configData.sessionInfo[sessName].sshHost = sshHost;
+        configData.sessionInfo[sessName].sshCwd = sshCwd;
     } catch (e) { if (e.message !== 'Unauthorized') alert(e.message); }
 }
 
