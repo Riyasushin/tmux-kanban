@@ -613,6 +613,16 @@ def _ensure_session(name: str, cwd: str = "~"):
         raise RuntimeError(f"tmux new-session failed: {result.stderr.strip()}")
 
 
+def _kill_remote_tmux(name: str, info: dict):
+    """Kill remote tmux session with same name via SSH, if sshHost is configured."""
+    ssh_host = info.get("sshHost", "")
+    if ssh_host:
+        subprocess.run(
+            ["ssh", ssh_host, "tmux", "kill-session", "-t", name],
+            capture_output=True, text=True, timeout=5,
+        )
+
+
 # ── Auth endpoints ──
 
 @app.get("/api/auth/status")
@@ -1325,6 +1335,8 @@ async def delete_session(name: str, force: bool = False):
                 os.rmdir(parent)
         # Kill tmux session only after all checks pass
         run_tmux("kill-session", "-t", name)
+        # Also kill remote tmux session if SSH host is set
+        _kill_remote_tmux(name, info)
         config["sessionInfo"].pop(name, None)
         config["sessionStatus"].pop(name, None)
         for p in config["projects"]:
@@ -1430,6 +1442,9 @@ async def stop_session(name: str):
     )
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=result.stderr.strip())
+    config = load_config()
+    info = config.get("sessionInfo", {}).get(name, {})
+    _kill_remote_tmux(name, info)
     return {"ok": True}
 
 
