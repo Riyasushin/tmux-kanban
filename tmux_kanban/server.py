@@ -99,23 +99,84 @@ def _init_agent_token():
 def _write_helper_script():
     """Deploy alert-agent-needs-you.sh helper to ~/.tmux-kanban/."""
     script_path = os.path.join(KANBAN_DIR, "alert-agent-needs-you.sh")
+    notify_path = os.path.join(KANBAN_DIR, "notify-kanban.sh")
     script = r"""#!/bin/bash
 # Notify tmux-kanban that this session's agent needs your attention.
 MESSAGE="${1:-Needs your attention}"
+SESSION="${TMUX_KANBAN_SESSION:-}"
+if [ -z "$SESSION" ]; then
+    SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+fi
+[ -z "$SESSION" ] && exit 0
+
+MANAGED="${TMUX_KANBAN_MANAGED:-}"
+if [ "$MANAGED" != "1" ]; then
+    MANAGED_LINE="$(tmux show-environment -t "$SESSION" TMUX_KANBAN_MANAGED 2>/dev/null || true)"
+    [ "$MANAGED_LINE" = "TMUX_KANBAN_MANAGED=1" ] && MANAGED="1"
+fi
+[ "$MANAGED" != "1" ] && exit 0
+
+BASE_URL="${TMUX_KANBAN_URL:-}"
+if [ -z "$BASE_URL" ]; then
+    URL_LINE="$(tmux show-environment -t "$SESSION" TMUX_KANBAN_URL 2>/dev/null || true)"
+    case "$URL_LINE" in
+        TMUX_KANBAN_URL=*) BASE_URL="${URL_LINE#TMUX_KANBAN_URL=}" ;;
+    esac
+fi
 HOST="${TMUX_KANBAN_HOST:-127.0.0.1}"
 PORT="${TMUX_KANBAN_PORT:-59235}"
-SESSION="${TMUX_KANBAN_SESSION:-$(tmux display-message -p '#S' 2>/dev/null || echo 'unknown')}"
+BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
 TOKEN=$(cat "$HOME/.tmux-kanban/agent-token" 2>/dev/null)
 [ -z "$TOKEN" ] && exit 1
-curl -s -X PUT "http://${HOST}:${PORT}/api/sessions/${SESSION}/attention" \
+BODY=$(MESSAGE="$MESSAGE" python3 -c 'import json, os; print(json.dumps({"message": os.environ.get("MESSAGE", "")}))')
+curl -s -X PUT "${BASE_URL}/api/sessions/${SESSION}/attention" \
     -H "X-Auth-Token: ${TOKEN}" \
     -H "Content-Type: application/json" \
-    -d '{"message": "'"${MESSAGE}"'"}' -o /dev/null
+    -d "${BODY}" -o /dev/null
+exit 0
+"""
+    notify_script = r"""#!/bin/bash
+# Ask tmux-kanban dashboards to refresh.
+EVENT_TYPE="${1:-refresh}"
+MESSAGE="${2:-}"
+SESSION="${TMUX_KANBAN_SESSION:-}"
+if [ -z "$SESSION" ]; then
+    SESSION="$(tmux display-message -p '#S' 2>/dev/null || true)"
+fi
+[ -z "$SESSION" ] && exit 0
+
+MANAGED="${TMUX_KANBAN_MANAGED:-}"
+if [ "$MANAGED" != "1" ]; then
+    MANAGED_LINE="$(tmux show-environment -t "$SESSION" TMUX_KANBAN_MANAGED 2>/dev/null || true)"
+    [ "$MANAGED_LINE" = "TMUX_KANBAN_MANAGED=1" ] && MANAGED="1"
+fi
+[ "$MANAGED" != "1" ] && exit 0
+
+BASE_URL="${TMUX_KANBAN_URL:-}"
+if [ -z "$BASE_URL" ]; then
+    URL_LINE="$(tmux show-environment -t "$SESSION" TMUX_KANBAN_URL 2>/dev/null || true)"
+    case "$URL_LINE" in
+        TMUX_KANBAN_URL=*) BASE_URL="${URL_LINE#TMUX_KANBAN_URL=}" ;;
+    esac
+fi
+HOST="${TMUX_KANBAN_HOST:-127.0.0.1}"
+PORT="${TMUX_KANBAN_PORT:-59235}"
+BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
+TOKEN=$(cat "$HOME/.tmux-kanban/agent-token" 2>/dev/null)
+[ -z "$TOKEN" ] && exit 1
+BODY=$(EVENT_TYPE="$EVENT_TYPE" SESSION="$SESSION" MESSAGE="$MESSAGE" python3 -c 'import json, os; print(json.dumps({"type": os.environ.get("EVENT_TYPE", "refresh"), "session": os.environ.get("SESSION"), "message": os.environ.get("MESSAGE", "")}))')
+curl -s -X POST "${BASE_URL}/api/events/notify" \
+    -H "X-Auth-Token: ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "${BODY}" -o /dev/null
 exit 0
 """
     with open(script_path, "w") as f:
         f.write(script)
     os.chmod(script_path, 0o755)
+    with open(notify_path, "w") as f:
+        f.write(notify_script)
+    os.chmod(notify_path, 0o755)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -124,8 +185,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Always public: static files, index page, auth status, auth login
         if path == "/" or path.startswith("/static") or path in ("/api/auth/status", "/api/auth/login"):
             return await call_next(request)
-        # Agent attention endpoint: uses agent_token (not web auth)
+        # Agent hook endpoints: use agent_token (not web auth)
         if request.method == "PUT" and re.match(r"^/api/sessions/[^/]+/attention$", path):
+            token = request.headers.get("X-Auth-Token", "")
+            if token and token == _agent_token:
+                return await call_next(request)
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        if request.method == "POST" and path == "/api/events/notify":
             token = request.headers.get("X-Auth-Token", "")
             if token and token == _agent_token:
                 return await call_next(request)
@@ -156,6 +222,33 @@ class NoCacheStaticFiles(StaticFiles):
 app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
 
+_event_clients: set[WebSocket] = set()
+_event_seq = 0
+
+
+async def _send_event_to_clients(message: str):
+    dead = []
+    for client in list(_event_clients):
+        try:
+            await client.send_text(message)
+        except Exception:
+            dead.append(client)
+    for client in dead:
+        _event_clients.discard(client)
+
+
+def notify_clients(event_type: str = "refresh", payload: dict | None = None):
+    """Best-effort event push to open dashboards."""
+    global _event_seq
+    _event_seq += 1
+    message = json.dumps({"type": event_type, "seq": _event_seq, "payload": payload or {}})
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_send_event_to_clients(message))
+
+
 def validate_name(name: str, label: str = "name"):
     if not name or not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]*$', name) or len(name) > 64:
         raise HTTPException(status_code=400, detail=f"Invalid {label}: must be 1-64 alphanumeric/dash/underscore characters")
@@ -163,12 +256,35 @@ def validate_name(name: str, label: str = "name"):
 
 _HOME = os.path.realpath(os.path.expanduser("~"))  # resolve symlinks (e.g. /home/x -> /gpfs/.../x)
 
+
+def _path_in_root(path: str, root: str) -> bool:
+    path_real = os.path.realpath(path)
+    root_real = os.path.realpath(root)
+    return path_real == root_real or path_real.startswith(root_real + os.sep)
+
+
+def _allowed_local_roots() -> list[str]:
+    roots = [_HOME, KANBAN_DIR]
+    env_roots = os.environ.get("TMUX_KANBAN_ALLOWED_ROOTS", "")
+    for raw in env_roots.split(os.pathsep):
+        if raw.strip():
+            roots.append(os.path.abspath(os.path.expanduser(raw.strip())))
+    wt_root = os.environ.get("TMUX_KANBAN_WORKTREE_PATH")
+    if wt_root:
+        roots.append(os.path.abspath(os.path.expanduser(wt_root)))
+    return list(dict.fromkeys(roots))
+
+
 def safe_path(path: str) -> str:
-    """Expand path. Empty/'~' resolve to home. Preserves symlink paths as-is."""
+    """Expand path and keep local filesystem operations inside trusted roots."""
     if not path or path == "~":
         return _HOME
     expanded = os.path.expanduser(path)
-    return os.path.abspath(expanded)
+    absolute = os.path.abspath(expanded)
+    if not any(_path_in_root(absolute, root) for root in _allowed_local_roots()):
+        roots = ", ".join(to_home_display(r) for r in _allowed_local_roots())
+        raise HTTPException(status_code=400, detail=f"Path is outside allowed roots: {roots}")
+    return absolute
 
 
 def to_home_display(p: str) -> str:
@@ -187,7 +303,26 @@ def get_wt_base(config) -> str:
     """Get validated worktree base path from config. Falls back to default if invalid."""
     wt = os.path.expanduser(config.get("settings", {}).get("worktreePath", "~/.tmux-kanban/worktrees"))
     wt = os.path.abspath(wt)
+    if not any(_path_in_root(wt, root) for root in _allowed_local_roots()):
+        wt = os.path.join(KANBAN_DIR, "worktrees")
     return wt
+
+
+def validate_ssh_host(ssh_host: str):
+    if not ssh_host:
+        return
+    if ssh_host.startswith("-") or not re.match(r"^[A-Za-z0-9_.@:-]+$", ssh_host):
+        raise HTTPException(status_code=400, detail="Invalid SSH host")
+
+
+def remote_tmux_command(ssh_host: str, cwd: str, session_name: str) -> str:
+    validate_ssh_host(ssh_host)
+    remote_cmd = f"cd {shlex.quote(cwd or '~')} && tmux new-session -A -s {shlex.quote(session_name)}"
+    return f"ssh -t {shlex.quote(ssh_host)} {shlex.quote(remote_cmd)}"
+
+
+_git_check_cache: dict[str, tuple[float, bool, str | None]] = {}
+GIT_CHECK_TTL_SECONDS = 15
 
 
 # ── Tmux Control Mode (persistent connection) ──
@@ -307,11 +442,46 @@ class TmuxControl:
 _tmux_ctrl = TmuxControl()
 
 
+class TmuxError(RuntimeError):
+    """Raised when tmux returns a real error rather than "no server running"."""
+
+
+@app.exception_handler(TmuxError)
+async def tmux_error_handler(request: Request, exc: TmuxError):
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
+def _format_tmux_error(action: str, result: subprocess.CompletedProcess) -> str:
+    detail = (result.stderr or result.stdout or "").strip()
+    if not detail:
+        detail = f"exit code {result.returncode}"
+    hint = ""
+    lower = detail.lower()
+    if "server exited unexpectedly" in lower:
+        hint = " Check the tmux server/socket state; `tmux -vv list-sessions` usually shows the underlying cause."
+    elif "operation not permitted" in lower or "permission denied" in lower:
+        hint = " Check the tmux socket permissions and the user running tmux-kanban."
+    return f"tmux {action} failed: {detail}{hint}"
+
+
+def _run_tmux(args: list[str], *, action: str, timeout: int = 5, allow_no_server: bool = False) -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(
+            ["tmux", *args], capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TmuxError(f"tmux {action} timed out after {timeout}s") from e
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().lower()
+        if allow_no_server and "no server running" in detail:
+            return result
+        raise TmuxError(_format_tmux_error(action, result))
+    return result
+
+
 def run_tmux(*args):
     """Sync tmux command (for cold path / non-async contexts)."""
-    result = subprocess.run(
-        ["tmux", *args], capture_output=True, text=True, timeout=5
-    )
+    result = _run_tmux(list(args), action="command")
     return result.stdout.strip()
 
 
@@ -342,6 +512,7 @@ def detect_activity_from_captures(session_name: str, pane_captures: dict[str, st
         return False
 
     now = time.time()
+    was_active = _pane_active.get(session_name)
     is_active = False
     for pane_id, content in pane_captures.items():
         h = hashlib.md5(content.encode()).hexdigest()
@@ -357,6 +528,8 @@ def detect_activity_from_captures(session_name: str, pane_captures: dict[str, st
             _pane_work_start[session_name] = now
         _pane_active[session_name] = True
         _pane_last_idle.pop(session_name, None)
+        if was_active is False:
+            notify_clients("activity_changed", {"session": session_name, "active": True})
         return True
     else:
         last_output = _pane_last_output.get(session_name, 0)
@@ -368,6 +541,8 @@ def detect_activity_from_captures(session_name: str, pane_captures: dict[str, st
                 _pane_last_idle[session_name] = now
             _pane_active[session_name] = False
             _pane_work_start.pop(session_name, None)
+            if was_active is True:
+                notify_clients("activity_changed", {"session": session_name, "active": False})
             return False
 
 
@@ -388,16 +563,21 @@ async def _activity_poll_loop():
                 'list-panes -a -F "#{session_name}|#{pane_id}|#{pane_current_command}"'
             )
             session_panes: dict[str, list] = {}
-            all_pane_ids = []
             if raw:
                 for line in raw.splitlines():
                     parts = line.split("|", 2)
                     if len(parts) >= 2:
                         pane = {"id": parts[1], "command": parts[2] if len(parts) > 2 else ""}
                         session_panes.setdefault(parts[0], []).append(pane)
-                        all_pane_ids.append(parts[1])
             _bg_pane_cache.clear()
-            session_panes.pop("_kanban_ctrl", None)  # hide if somehow present
+            registered = set(load_config().get("sessionInfo", {}).keys()) - {"_kanban_ctrl"}
+            session_panes = {name: panes for name, panes in session_panes.items() if name in registered}
+            all_pane_ids = [pane["id"] for panes in session_panes.values() for pane in panes]
+            for stale in set(_pane_active.keys()) - registered:
+                _pane_active.pop(stale, None)
+                _pane_last_output.pop(stale, None)
+                _pane_work_start.pop(stale, None)
+                _pane_last_idle.pop(stale, None)
             _bg_pane_cache.update(session_panes)
 
             # Step 2: batch capture all panes (N commands, one batch call)
@@ -423,6 +603,7 @@ async def start_background_tasks():
     # Control mode connects lazily on first command (needs existing sessions)
     _init_agent_token()
     _write_helper_script()
+    _mark_registered_tmux_sessions()
     asyncio.create_task(_activity_poll_loop())
     signal.signal(signal.SIGCHLD, lambda *_: _reap_children())
     # Password setup is now done client-side (no server-generated secrets)
@@ -453,52 +634,65 @@ def _reap_children():
 
 
 def get_activity_info(session_name: str) -> dict:
-    """Return timing info for display."""
+    """Return cached activity state for display."""
     active = _pane_active.get(session_name, False)
-    now = time.time()
     if active:
-        since = _pane_work_start.get(session_name, now)
-        elapsed = int(now - since)
-        return {"active": True, "label": f"working {_fmt_duration(elapsed)}"}
-    else:
-        since = _pane_last_idle.get(session_name)
-        if since:
-            elapsed = int(now - since)
-            return {"active": False, "label": f"idle {_fmt_duration(elapsed)}"}
-        return {"active": False, "label": "idle"}
-
-
-def _fmt_duration(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        return f"{seconds // 60}m"
-    else:
-        return f"{seconds // 3600}h{(seconds % 3600) // 60}m"
+        return {"active": True, "label": "working"}
+    return {"active": False, "label": "idle"}
 
 
 def get_live_sessions():
     """Get set of currently running tmux session names."""
-    raw = run_tmux("list-sessions", "-F", "#{session_name}")
+    result = _run_tmux(
+        ["list-sessions", "-F", "#{session_name}"],
+        action="list sessions",
+        allow_no_server=True,
+    )
+    if result.returncode != 0:
+        return set()
+    raw = result.stdout.strip()
     if not raw:
         return set()
     return set(raw.splitlines())
+
+
+def _set_kanban_session_env(name: str):
+    """Mark a tmux session as managed by this tmux-kanban instance."""
+    base_url = os.environ.get("TMUX_KANBAN_URL", "http://127.0.0.1:59235")
+    env = {
+        "TMUX_KANBAN_MANAGED": "1",
+        "TMUX_KANBAN_SESSION": name,
+        "TMUX_KANBAN_URL": base_url,
+        "TMUX_KANBAN_HOST": os.environ.get("TMUX_KANBAN_HOST", "127.0.0.1"),
+        "TMUX_KANBAN_PORT": os.environ.get("TMUX_KANBAN_PORT", "59235"),
+    }
+    for key, value in env.items():
+        run_tmux("set-environment", "-t", name, key, value)
+
+
+def _mark_registered_tmux_sessions():
+    """Refresh tmux session environment for already-registered live sessions."""
+    config = load_config()
+    registered = set(config.get("sessionInfo", {}).keys()) - {"_kanban_ctrl"}
+    live = get_live_sessions()
+    for name in registered & live:
+        _set_kanban_session_env(name)
 
 
 def ensure_tmux_session(name, cwd="~"):
     """Create tmux session if it doesn't exist. Returns True if created, raises on failure."""
     live = get_live_sessions()
     if name in live:
+        _set_kanban_session_env(name)
         return False
     expanded = os.path.expanduser(cwd)
     if not os.path.isdir(expanded):
         expanded = os.path.expanduser("~")
-    result = subprocess.run(
-        ["tmux", "new-session", "-d", "-s", name, "-c", expanded],
-        capture_output=True, text=True, timeout=5,
+    _run_tmux(
+        ["new-session", "-d", "-s", name, "-c", expanded],
+        action="new-session",
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"tmux new-session failed: {result.stderr.strip()}")
+    _set_kanban_session_env(name)
     return True
 
 
@@ -526,6 +720,22 @@ def check_git(cwd):
         return True, branch
     except Exception:
         return False, None
+
+
+def check_git_cached(cwd):
+    """Cached git check for hot dashboard polling."""
+    expanded = os.path.abspath(os.path.expanduser(cwd or "~"))
+    now = time.time()
+    cached = _git_check_cache.get(expanded)
+    if cached and now - cached[0] < GIT_CHECK_TTL_SECONDS:
+        return cached[1], cached[2]
+    is_git, branch = check_git(expanded)
+    _git_check_cache[expanded] = (now, is_git, branch)
+    if len(_git_check_cache) > 256:
+        oldest = sorted(_git_check_cache.items(), key=lambda item: item[1][0])[:64]
+        for key, _ in oldest:
+            _git_check_cache.pop(key, None)
+    return is_git, branch
 
 
 def get_default_branch(cwd):
@@ -595,28 +805,22 @@ def save_config(config):
             json.dump(config, f, indent=2)
         os.replace(tmp, CONFIG_PATH)
         _config_cache = config  # update cache
-    except:
+        notify_clients("config_changed")
+    except Exception:
         os.unlink(tmp)
         raise
 
 
 def _ensure_session(name: str, cwd: str = "~"):
     """Create local tmux session if it doesn't exist."""
-    expanded = os.path.expanduser(cwd)
-    if not os.path.isdir(expanded):
-        expanded = os.path.expanduser("~")
-    result = subprocess.run(
-        ["tmux", "new-session", "-d", "-s", name, "-c", expanded],
-        capture_output=True, text=True, timeout=10,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"tmux new-session failed: {result.stderr.strip()}")
+    ensure_tmux_session(name, cwd)
 
 
 def _kill_remote_tmux(name: str, info: dict):
     """Kill remote tmux session with same name via SSH, if sshHost is configured."""
     ssh_host = info.get("sshHost", "")
     if ssh_host:
+        validate_ssh_host(ssh_host)
         subprocess.run(
             ["ssh", ssh_host, "tmux", "kill-session", "-t", name],
             capture_output=True, text=True, timeout=5,
@@ -687,7 +891,7 @@ async def auth_login(body: AuthLogin):
     return {"ok": True, "token": token}
 
 
-_SENSITIVE_KEYS = {"password_hash", "password_plain", "auth_tokens"}
+_SENSITIVE_KEYS = {"password_hash", "password_plain", "auth_tokens", "agent_token"}
 
 @app.get("/api/config")
 async def get_config():
@@ -700,9 +904,11 @@ async def get_config():
 @app.put("/api/settings")
 async def put_settings(body: dict):
     """Update only the settings field of config (theme, etc)."""
+    allowed = {"theme", "title"}
+    updates = {k: v for k, v in body.items() if k in allowed}
     async with _config_lock:
         config = load_config()
-        config["settings"] = {**config.get("settings", {}), **body}
+        config["settings"] = {**config.get("settings", {}), **updates}
         save_config(config)
     return {"ok": True}
 
@@ -712,8 +918,13 @@ class StatusUpdate(BaseModel):
 
 @app.put("/api/session/{name}/status")
 async def set_session_status(name: str, body: StatusUpdate):
+    validate_name(name, "session name")
+    if body.status not in {"todo", "running", "review", "finish"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
     async with _config_lock:
         config = load_config()
+        if name not in config["sessionInfo"]:
+            raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
         config["sessionStatus"][name] = body.status
         save_config(config)
     return {"ok": True}
@@ -728,6 +939,9 @@ class SessionInfoUpdate(BaseModel):
 @app.put("/api/session/{name}/info")
 async def update_session_info(name: str, body: SessionInfoUpdate):
     """Update session metadata (description, sortIndex, sshHost)."""
+    validate_name(name, "session name")
+    if body.sshHost is not None and body.sshHost:
+        validate_ssh_host(body.sshHost)
     async with _config_lock:
         config = load_config()
         if name not in config["sessionInfo"]:
@@ -754,6 +968,9 @@ async def update_sort_order(body: dict):
     async with _config_lock:
         config = load_config()
         for name, idx in order.items():
+            validate_name(name, "session name")
+            if not isinstance(idx, int):
+                raise HTTPException(status_code=400, detail="sortIndex must be an integer")
             if name in config["sessionInfo"]:
                 config["sessionInfo"][name]["sortIndex"] = idx
         save_config(config)
@@ -762,6 +979,22 @@ async def update_sort_order(body: dict):
 
 class AttentionRequest(BaseModel):
     message: str = ""
+
+
+class NotifyRequest(BaseModel):
+    type: str = "refresh"
+    session: str | None = None
+    message: str = ""
+
+
+@app.post("/api/events/notify")
+async def event_notify(body: NotifyRequest):
+    """Agent hook endpoint: ask dashboards to refresh without changing config."""
+    notify_clients(body.type or "refresh", {
+        "session": body.session,
+        "message": body.message,
+    })
+    return {"ok": True}
 
 
 @app.put("/api/sessions/{name}/attention")
@@ -798,18 +1031,25 @@ async def clear_attention(name: str):
 @app.post("/api/sessions/{name}/open-terminal")
 async def open_native_terminal(name: str):
     """Open a native terminal window attached to this tmux session."""
+    validate_name(name, "session name")
     config = load_config()
     info = config.get("sessionInfo", {}).get(name, {})
+    if not info:
+        raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
+    live = await asyncio.to_thread(get_live_sessions)
+    if name not in live:
+        raise HTTPException(status_code=400, detail="Session is not running")
     ssh_host = info.get("sshHost", "")
     ssh_cwd = info.get("sshCwd", "")
     if ssh_host:
+        validate_ssh_host(ssh_host)
         if ssh_cwd:
-            cmd = f"cd {ssh_cwd} && tmux attach -t {name}"
+            cmd = f"cd {shlex.quote(ssh_cwd)} && tmux attach -t {shlex.quote(name)}"
         else:
-            cmd = f"tmux attach -t {name}"
-        script = f"#!/bin/bash\nexec ssh -t {ssh_host} \"{cmd}\"\n"
+            cmd = f"tmux attach -t {shlex.quote(name)}"
+        script = f"#!/bin/bash\nexec ssh -t {shlex.quote(ssh_host)} {shlex.quote(cmd)}\n"
     else:
-        script = f"#!/bin/bash\nexec tmux attach -t {name}\n"
+        script = f"#!/bin/bash\nexec tmux attach -t {shlex.quote(name)}\n"
     platsys = sys.platform
     if platsys == "darwin":
         script_path = f"/tmp/tmux-kanban-attach-{name}.command"
@@ -911,10 +1151,11 @@ async def reorder_projects(body: dict):
 async def assign_session_to_project(name: str, body: dict):
     """Add a session to a project. Removes from other projects first (one session = one project)."""
     session = body.get("session", "")
-    if not session:
-        raise HTTPException(status_code=400, detail="session name is required")
+    validate_name(session, "session name")
     async with _config_lock:
         config = load_config()
+        if session not in config["sessionInfo"]:
+            raise HTTPException(status_code=404, detail=f"Session '{session}' not found")
         # Remove session from all other projects first
         for p in config["projects"]:
             if p["name"] != name:
@@ -932,6 +1173,7 @@ async def assign_session_to_project(name: str, body: dict):
 @app.delete("/api/projects/{name}/remove-session/{session}")
 async def remove_session_from_project(name: str, session: str):
     """Remove a session from a project."""
+    validate_name(session, "session name")
     async with _config_lock:
         config = load_config()
         for p in config["projects"]:
@@ -951,6 +1193,10 @@ async def path_complete(q: str = ""):
     else:
         parent = os.path.dirname(expanded) or "."
         prefix = os.path.basename(expanded).lower()
+    try:
+        safe_path(parent)
+    except HTTPException:
+        return {"completions": []}
     if not os.path.isdir(parent):
         return {"completions": []}
     try:
@@ -1012,16 +1258,22 @@ def _remote_home(ssh_host: str) -> str:
     return home
 
 
+def _run_subprocess(args, **kwargs):
+    return subprocess.run(args, **kwargs)
+
+
 @app.get("/api/remote-browse")
 async def remote_browse_dir(ssh_host: str = "", path: str = ""):
     """List remote directories via SSH."""
     if not ssh_host:
         raise HTTPException(status_code=400, detail="ssh_host is required")
+    validate_ssh_host(ssh_host)
     remote_path = path or "~"
     if remote_path.startswith("~"):
-        home = _remote_home(ssh_host)
+        home = await asyncio.to_thread(_remote_home, ssh_host)
         remote_path = home + remote_path[1:]
-    r = subprocess.run(
+    r = await asyncio.to_thread(
+        _run_subprocess,
         ["ssh", ssh_host, "ls", "-1pF", "--", remote_path],
         capture_output=True, text=True, timeout=10,
     )
@@ -1045,26 +1297,19 @@ async def remote_path_complete(ssh_host: str = "", q: str = ""):
     """Autocomplete remote path via SSH."""
     if not ssh_host:
         return {"completions": []}
+    validate_ssh_host(ssh_host)
     remote_q = q or "~"
     if remote_q.startswith("~"):
-        home = _remote_home(ssh_host)
+        home = await asyncio.to_thread(_remote_home, ssh_host)
         remote_q = home + remote_q[1:]
-    r = subprocess.run(
-        ["ssh", ssh_host, "bash", "-c", f"ls -1d -- {shlex.quote(remote_q)}* 2>/dev/null | head -12"],
+    remote_glob = f"{shlex.quote(remote_q)}*"
+    remote_cmd = f'for p in {remote_glob}; do [ -d "$p" ] && printf "%s/\\n" "$p"; done | head -12'
+    r = await asyncio.to_thread(
+        _run_subprocess,
+        ["ssh", ssh_host, "bash", "-c", remote_cmd],
         capture_output=True, text=True, timeout=10,
     )
-    results = []
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        r2 = subprocess.run(
-            ["ssh", ssh_host, "test", "-d", line],
-            capture_output=True, timeout=5,
-        )
-        if r2.returncode == 0:
-            results.append(line + "/")
-    return {"completions": results}
+    return {"completions": [line.strip() for line in r.stdout.splitlines() if line.strip()]}
 
 
 @app.get("/api/ssh-hosts")
@@ -1139,18 +1384,23 @@ class SessionCreate(BaseModel):
 @app.post("/api/sessions")
 async def create_session(body: SessionCreate):
     validate_name(body.name, "session name")
-    cwd = safe_path(body.cwd)
-    if not os.path.isdir(cwd):
-        cwd = os.path.expanduser("~")
+    config = load_config()
+    if body.name in config["sessionInfo"]:
+        raise HTTPException(status_code=400, detail=f"Session '{body.name}' already exists")
+    if body.sshHost:
+        validate_ssh_host(body.sshHost)
+        cwd = _HOME
+    else:
+        cwd = safe_path(body.cwd)
+        if not os.path.isdir(cwd):
+            cwd = os.path.expanduser("~")
     try:
         _ensure_session(body.name, cwd)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     # If SSH host is set, send SSH command into the local tmux session
     if body.sshHost:
-        remote_cwd = body.sshCwd or "~"
-        ssh_cmd = f"ssh -t {body.sshHost} \"cd {remote_cwd} && tmux new-session -A -s {body.name}\""
-        run_tmux("send-keys", "-t", body.name, ssh_cmd, "Enter")
+        run_tmux("send-keys", "-t", body.name, remote_tmux_command(body.sshHost, body.sshCwd or "~", body.name), "Enter")
     if body.command:
         run_tmux("send-keys", "-t", body.name, body.command, "Enter")
     async with _config_lock:
@@ -1198,8 +1448,13 @@ class SessionWithWorktree(BaseModel):
 @app.post("/api/create-session-with-worktree")
 async def create_session_with_worktree(body: SessionWithWorktree):
     """Create a worktree + tmux session in one step."""
+    if body.sshHost:
+        raise HTTPException(status_code=400, detail="Remote worktree creation is not supported yet")
     validate_name(body.name, "session name")
     validate_name(body.branch, "branch name")
+    config = load_config()
+    if body.name in config["sessionInfo"]:
+        raise HTTPException(status_code=400, detail=f"Session '{body.name}' already exists")
     expanded_cwd = safe_path(body.cwd)
     if not os.path.isdir(expanded_cwd):
         raise HTTPException(status_code=400, detail=f"Directory not found: {body.cwd}")
@@ -1213,7 +1468,6 @@ async def create_session_with_worktree(body: SessionWithWorktree):
         raise HTTPException(status_code=400, detail="Not a git repository")
     repo_name = os.path.basename(r.stdout.strip())
 
-    config = load_config()
     wt_base = get_wt_base(config)
     # Two-level: worktreeBase/repoName/branchName
     repo_dir = os.path.join(wt_base, repo_name)
@@ -1235,8 +1489,8 @@ async def create_session_with_worktree(body: SessionWithWorktree):
     # Create tmux session in the worktree
     display_path = to_home_display(wt_path)
     try:
-        _ensure_session(body.name, display_path, ssh_host=body.sshHost or "", ssh_cwd=body.sshCwd or "")
-    except RuntimeError as e:
+        _ensure_session(body.name, display_path)
+    except Exception as e:
         # Rollback: remove the worktree we just created
         rb = subprocess.run(["git", "-C", expanded_cwd, "worktree", "remove", wt_path, "--force"],
                             capture_output=True, text=True, timeout=10)
@@ -1271,13 +1525,17 @@ class SessionRename(BaseModel):
 
 @app.put("/api/sessions/{name}/rename")
 async def rename_session(name: str, body: SessionRename):
+    validate_name(name, "session name")
     validate_name(body.new_name, "session name")
     async with _config_lock:
         config = load_config()
+        if name not in config.get("sessionInfo", {}):
+            raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
         if body.new_name != name and (body.new_name in config.get("sessionInfo", {}) or body.new_name in config.get("sessionStatus", {})):
             raise HTTPException(status_code=400, detail=f"Session '{body.new_name}' already exists")
-        # Try renaming live tmux session (may not exist if dead)
-        run_tmux("rename-session", "-t", name, body.new_name)
+        live = get_live_sessions()
+        if name in live:
+            run_tmux("rename-session", "-t", name, body.new_name)
         if name in config["sessionStatus"]:
             config["sessionStatus"][body.new_name] = config["sessionStatus"].pop(name)
         if name in config["sessionInfo"]:
@@ -1286,6 +1544,8 @@ async def rename_session(name: str, body: SessionRename):
             if name in p.get("sessions", []):
                 p["sessions"] = [body.new_name if s == name else s for s in p["sessions"]]
         save_config(config)
+    if body.new_name in get_live_sessions():
+        _set_kanban_session_env(body.new_name)
     return {"ok": True}
 
 
@@ -1295,6 +1555,12 @@ class CommandSend(BaseModel):
 @app.post("/api/sessions/{name}/command")
 async def send_command(name: str, body: CommandSend):
     """Send a command to a running tmux session."""
+    validate_name(name, "session name")
+    config = load_config()
+    if name not in config.get("sessionInfo", {}):
+        raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
+    if name not in get_live_sessions():
+        raise HTTPException(status_code=400, detail="Session is not running")
     run_tmux("send-keys", "-t", name, body.command, "Enter")
     return {"ok": True}
 
@@ -1302,8 +1568,11 @@ async def send_command(name: str, body: CommandSend):
 @app.delete("/api/sessions/{name}")
 async def delete_session(name: str, force: bool = False):
     """Kill tmux session, clean up worktree if applicable, and remove from config."""
+    validate_name(name, "session name")
     async with _config_lock:
         config = load_config()
+        if name not in config.get("sessionInfo", {}):
+            raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
         info = config.get("sessionInfo", {}).get(name, {})
         cwd = info.get("cwd", "")
         wt_base = get_wt_base(config)
@@ -1333,8 +1602,10 @@ async def delete_session(name: str, force: bool = False):
             parent = os.path.dirname(expanded_cwd)
             if parent != wt_base and os.path.isdir(parent) and not os.listdir(parent):
                 os.rmdir(parent)
-        # Kill tmux session only after all checks pass
-        run_tmux("kill-session", "-t", name)
+        # Kill tmux session only after all checks pass. If it is already dead,
+        # keep deleting the stale dashboard registration.
+        if name in get_live_sessions():
+            run_tmux("kill-session", "-t", name)
         # Also kill remote tmux session if SSH host is set
         _kill_remote_tmux(name, info)
         config["sessionInfo"].pop(name, None)
@@ -1348,6 +1619,11 @@ async def delete_session(name: str, force: bool = False):
 @app.post("/api/sessions/{name}/scroll-bottom")
 async def scroll_bottom(name: str):
     """Exit copy-mode if active (jumps to bottom), then refresh."""
+    validate_name(name, "session name")
+    if name not in load_config().get("sessionInfo", {}):
+        raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
+    if name not in get_live_sessions():
+        return {"ok": True}
     in_mode = run_tmux("display-message", "-t", name, "-p", "#{pane_in_mode}")
     if in_mode.strip() == "1":
         run_tmux("send-keys", "-t", name, "q")
@@ -1436,27 +1712,32 @@ async def update_app(body: UpdateRequest | None = None):
 
 @app.post("/api/sessions/{name}/stop")
 async def stop_session(name: str):
-    result = subprocess.run(
-        ["tmux", "kill-session", "-t", name],
-        capture_output=True, text=True, timeout=5,
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=result.stderr.strip())
+    validate_name(name, "session name")
     config = load_config()
+    if name not in config.get("sessionInfo", {}):
+        raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
     info = config.get("sessionInfo", {}).get(name, {})
+    if name in get_live_sessions():
+        _run_tmux(["kill-session", "-t", name], action="kill-session")
     _kill_remote_tmux(name, info)
+    notify_clients("session_changed", {"session": name, "alive": False})
     return {"ok": True}
 
 
 @app.post("/api/sessions/{name}/start")
 async def start_session(name: str):
+    validate_name(name, "session name")
     config = load_config()
+    if name not in config.get("sessionInfo", {}):
+        raise HTTPException(status_code=404, detail=f"Session '{name}' not found")
     info = config.get("sessionInfo", {}).get(name, {})
     cwd = info.get("cwd", "~")
     ssh_host = info.get("sshHost", "")
     ssh_cwd = info.get("sshCwd", "")
+    if ssh_host:
+        cwd = _HOME
     expanded = os.path.expanduser(cwd)
-    if not os.path.isdir(expanded):
+    if not ssh_host and not os.path.isdir(expanded):
         cwd = "~"
         async with _config_lock:
             config = load_config()
@@ -1468,9 +1749,8 @@ async def start_session(name: str):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     if ssh_host:
-        remote_cwd = ssh_cwd or "~"
-        ssh_cmd = f"ssh -t {ssh_host} \"cd {remote_cwd} && tmux new-session -A -s {name}\""
-        run_tmux("send-keys", "-t", name, ssh_cmd, "Enter")
+        run_tmux("send-keys", "-t", name, remote_tmux_command(ssh_host, ssh_cwd or "~", name), "Enter")
+    notify_clients("session_changed", {"session": name, "alive": True})
     return {"ok": True}
 
 
@@ -1479,10 +1759,12 @@ async def scan_sessions():
     """Scan all live tmux sessions and register unknown ones into config."""
     config = load_config()
     live = get_live_sessions()
-    raw = run_tmux(
-        "list-panes", "-a",
-        "-F", "#{session_name}|#{pane_current_path}"
-    )
+    raw = ""
+    if live:
+        raw = run_tmux(
+            "list-panes", "-a",
+            "-F", "#{session_name}|#{pane_current_path}"
+        )
     live_cwds = {}
     if raw:
         for line in raw.splitlines():
@@ -1505,6 +1787,8 @@ async def scan_sessions():
                 added.append(name)
         if added:
             save_config(config)
+    if added:
+        _mark_registered_tmux_sessions()
     return {"ok": True, "added": added, "total": len(live)}
 
 
@@ -1566,15 +1850,18 @@ async def get_sessions():
             entry["activityLabel"] = "stopped"
 
         # Add git info
-        sess_cwd = config.get("sessionInfo", {}).get(name, {}).get("cwd", "~")
+        sess_info = config.get("sessionInfo", {}).get(name, {})
+        sess_cwd = sess_info.get("cwd", "~")
         if not sess_cwd or sess_cwd == "~":
             first_pane = entry["windows"][0]["panes"][0] if entry["windows"] else None
             if first_pane and first_pane["cwd"] not in ("-", ""):
                 sess_cwd = first_pane["cwd"]
-        is_git, git_branch = await asyncio.to_thread(check_git, sess_cwd)
+        if sess_info.get("sshHost"):
+            is_git, git_branch = False, None
+        else:
+            is_git, git_branch = await asyncio.to_thread(check_git_cached, sess_cwd)
         entry["isGit"] = is_git
         entry["gitBranch"] = git_branch
-        sess_info = config.get("sessionInfo", {}).get(name, {})
         entry["needsAttention"] = sess_info.get("needsAttention", False)
         entry["attentionMessage"] = sess_info.get("attentionMessage", "")
         entry["attentionAt"] = sess_info.get("attentionAt", "")
@@ -1587,8 +1874,13 @@ async def get_sessions():
 
 @app.get("/api/git/{session_name}/worktrees")
 async def list_worktrees(session_name: str):
+    validate_name(session_name, "session name")
     config = load_config()
     info = config.get("sessionInfo", {}).get(session_name, {})
+    if not info:
+        raise HTTPException(status_code=404, detail=f"Session '{session_name}' not found")
+    if info.get("sshHost"):
+        return {"worktrees": [], "defaultBranch": "main"}
     cwd = os.path.expanduser(info.get("cwd", "~"))
     r = subprocess.run(
         ["git", "-C", cwd, "worktree", "list", "--porcelain"],
@@ -1621,10 +1913,18 @@ class WorktreeCreate(BaseModel):
 
 @app.post("/api/git/{session_name}/worktree")
 async def create_worktree(session_name: str, body: WorktreeCreate):
+    validate_name(session_name, "session name")
     validate_name(body.branch, "branch name")
     config = load_config()
     info = config.get("sessionInfo", {}).get(session_name, {})
+    if not info:
+        raise HTTPException(status_code=404, detail=f"Session '{session_name}' not found")
+    if info.get("sshHost"):
+        raise HTTPException(status_code=400, detail="Remote worktree creation is not supported yet")
     cwd = os.path.expanduser(info.get("cwd", "~"))
+    new_sess_name = f"{session_name}-{body.branch}"
+    if new_sess_name in config.get("sessionInfo", {}):
+        raise HTTPException(status_code=400, detail=f"Session '{new_sess_name}' already exists")
     wt_base = get_wt_base(config)
     os.makedirs(wt_base, exist_ok=True)
 
@@ -1647,7 +1947,6 @@ async def create_worktree(session_name: str, body: WorktreeCreate):
         raise HTTPException(status_code=500, detail=r.stderr.strip())
 
     # Auto-create tmux session
-    new_sess_name = f"{session_name}-{body.branch}"
     display_path = to_home_display(wt_path)
     try:
         ensure_tmux_session(new_sess_name, display_path)
@@ -1673,8 +1972,14 @@ async def create_worktree(session_name: str, body: WorktreeCreate):
 
 @app.delete("/api/git/{session_name}/worktree/{branch}")
 async def delete_worktree(session_name: str, branch: str, force: bool = False):
+    validate_name(session_name, "session name")
+    validate_name(branch, "branch name")
     config = load_config()
     info = config.get("sessionInfo", {}).get(session_name, {})
+    if not info:
+        raise HTTPException(status_code=404, detail=f"Session '{session_name}' not found")
+    if info.get("sshHost"):
+        raise HTTPException(status_code=400, detail="Remote worktree deletion is not supported yet")
     cwd = os.path.expanduser(info.get("cwd", "~"))
     wt_base = get_wt_base(config)
     # Try new layout (repo/branch) first, fall back to legacy (session-branch)
@@ -1710,11 +2015,14 @@ async def delete_worktree(session_name: str, branch: str, force: bool = False):
 @app.get("/api/tmux-buffer")
 async def get_tmux_buffer(session: str = ""):
     """Get tmux paste buffer. If empty, fall back to visible pane content."""
-    content = run_tmux("show-buffer")
+    try:
+        content = run_tmux("show-buffer")
+    except TmuxError as e:
+        if "no buffer" not in str(e).lower():
+            raise
+        content = ""
     if not content and session:
         content = run_tmux("capture-pane", "-t", session, "-p")
-    else:
-        content = run_tmux("show-buffer")
     return {"content": content}
 
 
@@ -1724,31 +2032,42 @@ async def capture_pane(pane_id: str):
     return {"pane_id": pane_id, "content": content}
 
 
+@app.websocket("/ws/events")
+async def events_ws(websocket: WebSocket):
+    token = websocket.query_params.get("token", "")
+    config = load_config()
+    if not config.get("password_hash") or token not in _valid_tokens:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+    await websocket.accept()
+    _event_clients.add(websocket)
+    try:
+        await websocket.send_text(json.dumps({"type": "connected", "seq": _event_seq, "payload": {}}))
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _event_clients.discard(websocket)
+
+
 @app.websocket("/ws/terminal/{session_name}")
 async def terminal_ws(websocket: WebSocket, session_name: str):
     # Check auth token from query param
     token = websocket.query_params.get("token", "")
     config = load_config()
-    if config.get("password_hash") and token not in _valid_tokens:
+    if not config.get("password_hash") or token not in _valid_tokens:
         await websocket.close(code=4001, reason="Unauthorized")
         return
     await websocket.accept()
 
-    # Auto-create session if not running
-    info = config.get("sessionInfo", {}).get(session_name, {})
-    cwd = info.get("cwd", "~")
-    try:
-        created = ensure_tmux_session(session_name, cwd)
-    except RuntimeError:
-        await websocket.close(code=4002, reason="Failed to create tmux session")
+    # Attach only. Opening a terminal must not create or restart sessions.
+    live = await asyncio.to_thread(get_live_sessions)
+    if session_name not in live:
+        await websocket.close(code=4002, reason="Session is not running")
         return
-    # If session was just created and has SSH config, send the SSH command
-    if created:
-        ssh_host = info.get("sshHost", "")
-        if ssh_host:
-            ssh_cwd = info.get("sshCwd", "") or "~"
-            ssh_cmd = f"ssh -t {ssh_host} \"cd {ssh_cwd} && tmux new-session -A -s {session_name}\""
-            run_tmux("send-keys", "-t", session_name, ssh_cmd, "Enter")
 
     # Each WebSocket creates its own PTY → its own tmux client.
     # Mouse tracking: tmux mouse mode + TUI apps prevent xterm.js native selection.

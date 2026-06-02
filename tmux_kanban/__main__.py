@@ -43,6 +43,10 @@ def main():
         os.environ["TMUX_KANBAN_WORKTREE_PATH"] = os.path.expanduser(args.worktree_path)
 
     host = "0.0.0.0" if args.public else args.host
+    hook_host = "127.0.0.1" if host == "0.0.0.0" else host
+    os.environ["TMUX_KANBAN_HOST"] = hook_host
+    os.environ["TMUX_KANBAN_PORT"] = str(args.port)
+    os.environ["TMUX_KANBAN_URL"] = f"http://{hook_host}:{args.port}"
     _print_access_info(host, args.port)
     uvicorn.run("tmux_kanban.server:app", host=host, port=args.port)
 

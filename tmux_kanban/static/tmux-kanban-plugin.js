@@ -9,40 +9,38 @@
 // (auto-deployed by tmux-kanban on first startup).
 //
 // Remote kanban server? Set in your shell profile:
+//   export TMUX_KANBAN_URL=http://100.xxx.xxx.xxx:59235
+// or:
 //   export TMUX_KANBAN_HOST=100.xxx.xxx.xxx
 // Or set per-project: see README.
 
 const DEBOUNCE_MS = 3000; // avoid flooding on rapid permission prompts
 
 export const TmuxKanbanPlugin = async ({ $ }) => {
-  let _debounceTimer = null;
-  const host = process.env.TMUX_KANBAN_HOST || "";
-  const port = process.env.TMUX_KANBAN_PORT || "";
-  const envPrefix = [
-    host ? `TMUX_KANBAN_HOST=${host}` : "",
-    port ? `TMUX_KANBAN_PORT=${port}` : "",
-  ].filter(Boolean).join(" ");
+  let _lastNotifyAt = 0;
 
-  function _notify() {
-    if (_debounceTimer) clearTimeout(_debounceTimer);
-    _debounceTimer = setTimeout(() => {
-      $`${envPrefix} bash ~/.tmux-kanban/alert-agent-needs-you.sh "OpenCode needs your approval"`
-        .quiet()
-        .catch(() => {});
-    }, DEBOUNCE_MS);
+  async function _notify(message) {
+    const now = Date.now();
+    if (now - _lastNotifyAt < DEBOUNCE_MS) return;
+    _lastNotifyAt = now;
+    try {
+      await $`bash ~/.tmux-kanban/alert-agent-needs-you.sh ${message}`.quiet();
+    } catch {
+      // Keep OpenCode usable even if tmux-kanban is not running.
+    }
   }
 
   return {
     event: async ({ event }) => {
       switch (event.type) {
         case "permission.asked":
-          _notify();
+          await _notify("Needs your choice");
           break;
         case "session.idle":
-          _notify();
+          await _notify("Task output complete");
           break;
         case "session.error":
-          _notify();
+          await _notify("Task hit an error");
           break;
       }
     },

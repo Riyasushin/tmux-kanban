@@ -88,15 +88,16 @@ If your server has a public IP address, or you want to use a reverse proxy (Clou
 
 ## Agent Attention on Remote Servers
 
-When a coding agent runs on a *different* machine than tmux-kanban, you need two files on the remote server so the agent can ping the kanban API.
+When a coding agent runs on a *different* machine than tmux-kanban, copy the helper files below to the remote server so the agent can ping the kanban API.
 
 ### What needs to be on the remote server
 
-Only **two files** — no tmux-kanban install needed:
+No tmux-kanban install is needed on the remote:
 
 | File | Purpose |
 |------|---------|
 | `~/.tmux-kanban/alert-agent-needs-you.sh` | Shell script that calls the kanban API |
+| `~/.tmux-kanban/notify-kanban.sh` | Shell script that asks open dashboards to refresh without marking attention |
 | `~/.tmux-kanban/agent-token` | Auth token (auto-generated on first kanban startup) |
 
 ### OpenCode: step by step
@@ -109,6 +110,7 @@ REMOTE="user@remote-host"
 ssh "$REMOTE" "mkdir -p ~/.tmux-kanban ~/.config/opencode/plugins"
 
 scp ~/.tmux-kanban/alert-agent-needs-you.sh "$REMOTE:~/.tmux-kanban/"
+scp ~/.tmux-kanban/notify-kanban.sh          "$REMOTE:~/.tmux-kanban/"
 scp ~/.tmux-kanban/agent-token          "$REMOTE:~/.tmux-kanban/"
 
 # Deploy the OpenCode plugin
@@ -119,31 +121,38 @@ On the **remote server**, set the kanban server's address:
 
 ```bash
 ssh "$REMOTE"
-echo 'export TMUX_KANBAN_HOST=100.82.16.51' >> ~/.zshrc   # or ~/.bashrc
+echo 'export TMUX_KANBAN_URL=http://100.82.16.51:59235' >> ~/.zshrc   # or ~/.bashrc
+# Or use the MagicDNS name:
+# echo 'export TMUX_KANBAN_URL=http://machine-name.tailnet-name.ts.net:59235' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-**Done.** Next time you run `opencode` on the remote, the plugin is active. It reads `TMUX_KANBAN_HOST` from the environment, passes it to `alert-agent-needs-you.sh`, which uses `agent-token` to call the kanban API.
+`TMUX_KANBAN_HOST=100.82.16.51` plus `TMUX_KANBAN_PORT=59235` still works, but `TMUX_KANBAN_URL` is preferred because it also supports MagicDNS names and reverse-proxy URLs.
+
+**Done.** Next time you run `opencode` on the remote, the plugin is active. It inherits `TMUX_KANBAN_URL` from the environment, calls `alert-agent-needs-you.sh`, and that script uses `agent-token` to call the kanban API.
 
 ### How it works
 
 ```
 Remote opencode needs approval
-  → plugin reads TMUX_KANBAN_HOST from process.env
-  → calls alert-agent-needs-you.sh with HOST injected
-  → curl PUT http://100.82.16.51:59235/api/sessions/{name}/attention
+  → plugin receives permission.asked / session.idle / session.error
+  → message is "Needs your choice", "Task output complete", or "Task hit an error"
+  → calls alert-agent-needs-you.sh immediately (3-second duplicate guard)
+  → curl PUT $TMUX_KANBAN_URL/api/sessions/{name}/attention
   → kanban server validates agent-token
-  → session card glows red on the board
+  → server pushes /ws/events to open dashboards
+  → session card glows orange on the board
 ```
 
-The `agent-token` is a shared secret — it's the same file on both machines. The kanban server middleware recognizes it and bypasses normal password auth for the attention endpoint.
+The `agent-token` is a shared secret — it's the same file on both machines. The kanban server middleware recognizes it and bypasses normal password auth for the agent hook endpoints.
 
 ### Other agent CLIs (Claude Code, Codex, Kimi)
 
-Same principle — just the two helper files + environment variable. Follow the hook configs in [README](../README.md#-agent-attention-setup), but ensure `TMUX_KANBAN_HOST` is set on the remote machine.
+Same principle — just the helper files + environment variable. Follow the hook configs in [README](../README.md#-agent-attention-setup), but ensure `TMUX_KANBAN_URL` is set on the remote machine.
 
 ### Troubleshooting
 
-- **No notification appears**: check that `TMUX_KANBAN_HOST` is reachable from the remote (`curl http://100.82.16.51:59235/api/auth/status` should respond)
+- **No notification appears**: check that `TMUX_KANBAN_URL` is reachable from the remote (`curl "$TMUX_KANBAN_URL/api/auth/status"` should respond), then restart OpenCode so it reloads the plugin.
 - **401 Unauthorized**: the `agent-token` on the remote doesn't match the kanban server. Re-copy `~/.tmux-kanban/agent-token` from the kanban server.
 - **Wrong session highlighted**: the script uses `tmux display-message -p '#S'` to detect the session name. If opencode runs outside tmux, set `export TMUX_KANBAN_SESSION=your-session-name` on the remote.
+- **Connection refused**: make sure tmux-kanban is reachable on the Tailscale interface. Run it with `tmux-kanban --host 0.0.0.0` or `tmux-kanban --public`, and keep the URL on the tailnet rather than the public internet.

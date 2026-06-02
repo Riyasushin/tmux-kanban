@@ -502,6 +502,18 @@ body.ready { opacity: 1; }
     margin-right: 4px;
     flex-shrink: 0;
 }
+.card-done-btn {
+    background: var(--success);
+    border: none;
+    color: #06110a;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+.card-done-btn:hover { filter: brightness(1.12); }
 
 .session-card-body {
     padding: 0 14px 12px;
@@ -513,6 +525,14 @@ body.ready { opacity: 1; }
 .session-card-body .card-cwd {
     font-size: 12px;
     color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+}
+.session-card-body .card-remote {
+    font-size: 12px;
+    color: var(--accent);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

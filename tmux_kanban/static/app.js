@@ -3,9 +3,12 @@ let configData = { projects: [], sessionStatus: {} };
 let selectedProject = null; // null = "All"
 let authToken = localStorage.getItem('tmux-kanban:auth-token') || '';
 // Resolved $HOME of the host running tmux-kanban. Persists across
-// fetchAll() rounds because configData is reassigned every poll, but
-// we want the home fallback to fire at most once per page load.
+// fetchAll() rounds because configData is reassigned after each refresh,
+// but we want the home fallback to fire at most once per page load.
 let _resolvedHome = '';
+let eventsWs = null;
+let eventsReconnectTimer = null;
+let eventsRefreshTimer = null;
 
 // ── Auth helpers ──
 
@@ -20,6 +23,7 @@ function authFetch(url, opts = {}) {
             // Don't auto-show login — let checkAuth handle it on next refresh
             authToken = '';
             localStorage.removeItem('tmux-kanban:auth-token');
+            disconnectEvents();
             throw new Error('Unauthorized');
         }
         return res;
@@ -34,9 +38,38 @@ async function apiCheck(res) {
     return res;
 }
 
+async function readJsonOrThrow(res, label) {
+    if (!res.ok) {
+        throw new Error(`${label} failed (${res.status})`);
+    }
+    try {
+        return await res.json();
+    } catch (e) {
+        throw new Error(`${label} returned invalid JSON`);
+    }
+}
+
+function showStartupError(err) {
+    _modalLocked = true;
+    const modal = document.getElementById('modal');
+    const message = err && err.message ? err.message : String(err || 'Unknown startup error');
+    modal.innerHTML = `
+        <h2 style="font-size:28px;margin-bottom:12px">Tmux Kanban could not start</h2>
+        <p style="color:var(--text-low);margin-bottom:16px;line-height:1.6;font-size:15px">
+            The page loaded, but the startup API check failed.
+        </p>
+        <code style="font-family:monospace;color:var(--danger);font-size:14px;user-select:all;display:block;padding:12px;background:var(--bg-panel);border-radius:6px;word-break:break-word;line-height:1.5">${esc(message)}</code>
+        <div class="modal-actions" style="margin-top:18px">
+            <button class="btn-primary" onclick="location.reload()">Retry</button>
+        </div>
+    `;
+    document.getElementById('modal-overlay').classList.add('active');
+    document.body.classList.add('ready');
+}
+
 async function checkAuth() {
     const res = await fetch('/api/auth/status');
-    const data = await res.json();
+    const data = await readJsonOrThrow(res, '/api/auth/status');
     if (!data.hasPassword) {
         showSetupPage();
         return false;
@@ -47,6 +80,9 @@ async function checkAuth() {
     }
     // Verify token is still valid (use plain fetch to avoid authFetch throwing)
     const test = await fetch('/api/config', { headers: { 'X-Auth-Token': authToken, 'Content-Type': 'application/json' } });
+    if (!test.ok && test.status !== 401) {
+        throw new Error(`/api/config failed (${test.status})`);
+    }
     if (test.status === 401) {
         showLoginPage();
         return false;
@@ -185,6 +221,10 @@ let openDropdown = null;
 const STATUSES = ['todo', 'running', 'review', 'finish'];
 const STATUS_LABELS = { todo: 'Todo', running: 'Running', review: 'Review', finish: 'Finish' };
 const COLORS = ['sc0','sc1','sc2','sc3','sc4','sc5','sc6','sc7'];
+const XTERM_CSS_URL = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css';
+const XTERM_JS_URL = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js';
+const XTERM_FIT_JS_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js';
+let _xtermLoadPromise = null;
 
 function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
 function escAttr(s) { return String(s).replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
@@ -267,6 +307,51 @@ async function fetchAll() {
         console.error('fetchAll failed:', e);
         document.body.classList.add('ready'); // ensure page is visible even on error
     }
+}
+
+function scheduleFetchAll(delay = 150) {
+    if (!authToken) return;
+    clearTimeout(eventsRefreshTimer);
+    eventsRefreshTimer = setTimeout(() => {
+        fetchAll();
+    }, delay);
+}
+
+function disconnectEvents() {
+    clearTimeout(eventsReconnectTimer);
+    eventsReconnectTimer = null;
+    if (eventsWs) {
+        const ws = eventsWs;
+        eventsWs = null;
+        ws.onclose = null;
+        ws.close();
+    }
+}
+
+function connectEvents() {
+    if (!authToken) return;
+    if (eventsWs && (eventsWs.readyState === WebSocket.OPEN || eventsWs.readyState === WebSocket.CONNECTING)) return;
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${location.host}/ws/events?token=${encodeURIComponent(authToken)}`);
+    eventsWs = ws;
+
+    ws.onmessage = (event) => {
+        let data = {};
+        try { data = JSON.parse(event.data || '{}'); } catch {}
+        if (data.type === 'connected') return;
+        scheduleFetchAll();
+    };
+
+    ws.onclose = () => {
+        if (eventsWs === ws) eventsWs = null;
+        if (!authToken) return;
+        clearTimeout(eventsReconnectTimer);
+        eventsReconnectTimer = setTimeout(connectEvents, 1500);
+    };
+
+    ws.onerror = () => {
+        ws.close();
+    };
 }
 
 function getSessionStatus(name) {
@@ -447,11 +532,14 @@ document.addEventListener('pointerup', async (e) => {
 
     // Save to backend
     try {
-        await authFetch('/api/projects/reorder', {
+        await apiCheck(await authFetch('/api/projects/reorder', {
             method: 'PUT',
             body: JSON.stringify({ order: projects.map(p => p.name) }),
-        });
-    } catch { /* ignore */ }
+        }));
+    } catch (err) {
+        if (err.message !== 'Unauthorized') alert(err.message);
+        await fetchAll();
+    }
 });
 
 // ── Kanban ──
@@ -601,6 +689,11 @@ function renderSessionCard(sess) {
     const dotTitle = !alive ? 'Stopped' : (needsAttention ? (sess.attentionMessage || 'Needs your attention') : (isWorking ? 'Working' : 'Idle'));
     const desc = configData.sessionInfo?.[sess.name]?.description || '';
     const sshHost = configData.sessionInfo?.[sess.name]?.sshHost || '';
+    const sshCwd = configData.sessionInfo?.[sess.name]?.sshCwd || '';
+    const remoteLabel = sshHost ? `${sshHost}${sshCwd ? ':' + sshCwd : ''}` : '';
+    const doneButton = needsAttention
+        ? `<button class="card-done-btn" title="${escAttr(sess.attentionMessage || 'Clear notification')}" onclick="event.stopPropagation(); clearAttention('${escAttr(sess.name)}')">Done</button>`
+        : '';
 
     return `
     <div class="session-card${deadClass}${attnClass}" data-session="${escAttr(sess.name)}" onclick="openTerminal('${escAttr(sess.name)}', '${escAttr(sess.name)}')">
@@ -608,14 +701,26 @@ function renderSessionCard(sess) {
             <span class="session-dot ${dotClass}" title="${escAttr(dotTitle)}"></span>
             <span class="card-name">${esc(sess.name)}</span>
             ${sshHost ? `<span class="card-ssh" title="Remote: ${escAttr(sshHost)}">&#8599;</span>` : ''}
+            ${doneButton}
             <button class="status-menu-btn" onclick="event.stopPropagation(); showSessionSettings('${escAttr(sess.name)}')">&#9881;</button>
         </div>
         ${desc ? `<div class="card-desc">${esc(desc)}</div>` : ''}
         <div class="session-card-body">
             <span class="card-info">${alive ? paneCount + ' panes &middot; ' : ''}${esc(statusText)}</span>
             <span class="card-cwd">${esc(cwd)}</span>
+            ${remoteLabel ? `<span class="card-remote" title="${escAttr(remoteLabel)}">${esc(remoteLabel)}</span>` : ''}
         </div>
     </div>`;
+}
+
+async function clearAttention(sessionName) {
+    try {
+        await apiCheck(await authFetch(`/api/sessions/${encodeURIComponent(sessionName)}/attention`, { method: 'DELETE' }));
+        await fetchAll();
+        if (currentSessionName === sessionName) _updateAttentionDoneBtn(sessionName);
+    } catch (e) {
+        if (e.message !== 'Unauthorized') alert(e.message);
+    }
 }
 
 // ── Custom Drag & Drop (mouse-based, no browser ghost) ──
@@ -716,7 +821,7 @@ document.addEventListener('pointerup', async (e) => {
                 // Remove from all projects
                 for (const p of configData.projects) {
                     if (p.sessions && p.sessions.includes(sessName)) {
-                        await authFetch(`/api/projects/${encodeURIComponent(p.name)}/remove-session/${encodeURIComponent(sessName)}`, { method: 'DELETE' });
+                        await apiCheck(await authFetch(`/api/projects/${encodeURIComponent(p.name)}/remove-session/${encodeURIComponent(sessName)}`, { method: 'DELETE' }));
                     }
                 }
             } else {
@@ -775,8 +880,11 @@ document.addEventListener('pointerup', async (e) => {
     renderKanban();
     updateStats();
     try {
-        await authFetch('/api/sessions/sort', { method: 'PUT', body: JSON.stringify({ order }) });
-    } catch { /* ignore */ }
+        await apiCheck(await authFetch('/api/sessions/sort', { method: 'PUT', body: JSON.stringify({ order }) }));
+    } catch (err) {
+        if (err.message !== 'Unauthorized') alert(err.message);
+        await fetchAll();
+    }
 });
 
 function _getDragInsertInfo(clientY, colBody, dragName) {
@@ -1150,10 +1258,17 @@ async function deleteSelectedProjects() {
     if (!names.length) return;
     if (!confirm(`Delete ${names.length} project${names.length > 1 ? 's' : ''}?\n\n${names.join(', ')}`)) return;
 
+    const errors = [];
     for (const name of names) {
-        await authFetch(`/api/projects/${encodeURIComponent(name)}`, { method: 'DELETE' });
-        if (selectedProject === name) selectedProject = null;
+        try {
+            await apiCheck(await authFetch(`/api/projects/${encodeURIComponent(name)}`, { method: 'DELETE' }));
+            if (selectedProject === name) selectedProject = null;
+        } catch (e) {
+            if (e.message === 'Unauthorized') return;
+            errors.push(`${name}: ${e.message}`);
+        }
     }
+    if (errors.length) alert(`Failed to delete:\n${errors.join('\n')}`);
     await fetchAll();
     showManageProjects();
 }
@@ -2288,11 +2403,7 @@ function _updateAttentionDoneBtn(sessionName) {
         btn.className = 'term-btn attention-done-btn';
         btn.textContent = 'Done';
         btn.title = sess.attentionMessage || 'Clear attention flag';
-        btn.onclick = async () => {
-            await authFetch(`/api/sessions/${encodeURIComponent(sessionName)}/attention`, { method: 'DELETE' });
-            await fetchAll();
-            _updateAttentionDoneBtn(sessionName);
-        };
+        btn.onclick = () => clearAttention(sessionName);
         bar.appendChild(btn);
     });
 }
@@ -2360,7 +2471,62 @@ function openTerminal(sessionName, label) {
     setTimeout(() => document.getElementById('draft-input')?.focus(), 100);
 }
 
-function initTerminal(bodyEl, sessionName) {
+function _loadScript(src, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[src="${src}"]`);
+        if (existing?.dataset.loaded === 'true') {
+            resolve();
+            return;
+        }
+        const script = existing || document.createElement('script');
+        const timer = setTimeout(() => reject(new Error(`Timed out loading ${src}`)), timeoutMs);
+        script.onload = () => {
+            clearTimeout(timer);
+            script.dataset.loaded = 'true';
+            resolve();
+        };
+        script.onerror = () => {
+            clearTimeout(timer);
+            reject(new Error(`Failed to load ${src}`));
+        };
+        if (!existing) {
+            script.src = src;
+            document.head.appendChild(script);
+        }
+    });
+}
+
+function _loadStylesheet(href) {
+    if (document.querySelector(`link[href="${href}"]`)) return;
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    document.head.appendChild(link);
+}
+
+async function ensureXtermLoaded() {
+    if (window.Terminal && window.FitAddon?.FitAddon) return;
+    if (!_xtermLoadPromise) {
+        _xtermLoadPromise = (async () => {
+            _loadStylesheet(XTERM_CSS_URL);
+            if (!window.Terminal) await _loadScript(XTERM_JS_URL);
+            if (!window.FitAddon?.FitAddon) await _loadScript(XTERM_FIT_JS_URL);
+        })().catch(err => {
+            _xtermLoadPromise = null;
+            throw err;
+        });
+    }
+    await _xtermLoadPromise;
+}
+
+async function initTerminal(bodyEl, sessionName) {
+    try {
+        await ensureXtermLoaded();
+    } catch (e) {
+        bodyEl.innerHTML = `<div style="padding:16px;color:var(--danger);font-family:monospace;line-height:1.5">Terminal assets could not load.<br>${esc(e.message)}</div>`;
+        return;
+    }
+
     const term = new Terminal({
         cursorBlink: true,
         fontSize: 13,
@@ -2375,42 +2541,62 @@ function initTerminal(bodyEl, sessionName) {
     currentTerminal = { term, fitAddon };
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${location.host}/ws/terminal/${encodeURIComponent(sessionName)}?token=${encodeURIComponent(authToken)}`);
-    currentWs = ws;
-    ws.binaryType = 'arraybuffer';
-
+    const wsUrl = `${protocol}//${location.host}/ws/terminal/${encodeURIComponent(sessionName)}?token=${encodeURIComponent(authToken)}`;
     let _wsHeartbeat = null;
-    ws.onopen = () => {
-        ws.send(`resize:${term.cols},${term.rows}`);
-        // Heartbeat: send ping every 30s to keep connection alive
-        _wsHeartbeat = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.send('');
-        }, 30000);
-    };
-    ws.onmessage = (evt) => {
+    let _wsReconnectTimer = null;
+
+    function clearTerminalTimers() {
+        if (_wsHeartbeat) { clearInterval(_wsHeartbeat); _wsHeartbeat = null; }
+        if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+    }
+
+    function handleTerminalMessage(evt) {
         if (evt.data instanceof ArrayBuffer) term.write(new Uint8Array(evt.data));
         else term.write(evt.data);
-    };
-    ws.onclose = () => {
-        if (_wsHeartbeat) { clearInterval(_wsHeartbeat); _wsHeartbeat = null; }
-        // Auto-reconnect after 2 seconds if this session is still open
-        if (currentSessionName === sessionName) {
-            term.write('\r\n\x1b[90m[disconnected — reconnecting...]\x1b[0m\r\n');
-            setTimeout(() => {
-                if (currentSessionName === sessionName && (!currentWs || currentWs.readyState !== WebSocket.OPEN)) {
-                    const newWs = new WebSocket(`${protocol}//${location.host}/ws/terminal/${encodeURIComponent(sessionName)}?token=${encodeURIComponent(authToken)}`);
-                    newWs.binaryType = 'arraybuffer';
-                    currentWs = newWs;
-                    newWs.onopen = ws.onopen;
-                    newWs.onmessage = ws.onmessage;
-                    newWs.onclose = ws.onclose;
-                    term.write('\r\n\x1b[90m[reconnected]\x1b[0m\r\n');
-                }
-            }, 2000);
-        } else {
-            term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n');
-        }
-    };
+    }
+
+    function connectTerminalWs(showReconnected = false) {
+        const socket = new WebSocket(wsUrl);
+        socket.binaryType = 'arraybuffer';
+        currentWs = socket;
+
+        socket.onopen = () => {
+            if (currentWs !== socket) return;
+            socket.send(`resize:${term.cols},${term.rows}`);
+            if (showReconnected) term.write('\r\n\x1b[90m[reconnected]\x1b[0m\r\n');
+            if (_wsHeartbeat) clearInterval(_wsHeartbeat);
+            _wsHeartbeat = setInterval(() => {
+                if (currentWs === socket && socket.readyState === WebSocket.OPEN) socket.send('');
+            }, 30000);
+        };
+
+        socket.onmessage = handleTerminalMessage;
+        socket.onclose = (event) => {
+            if (currentWs === socket) currentWs = null;
+            if (_wsHeartbeat) { clearInterval(_wsHeartbeat); _wsHeartbeat = null; }
+            if (event.code === 4001 || event.code === 4002) {
+                const msg = event.code === 4002
+                    ? 'Session is not running. Use Start Session before opening the terminal.'
+                    : 'Terminal connection unauthorized. Please log in again.';
+                term.write(`\r\n\x1b[90m[${msg}]\x1b[0m\r\n`);
+                return;
+            }
+            // Auto-reconnect after 2 seconds if this session is still open
+            if (currentSessionName === sessionName) {
+                term.write('\r\n\x1b[90m[disconnected — reconnecting...]\x1b[0m\r\n');
+                _wsReconnectTimer = setTimeout(() => {
+                    _wsReconnectTimer = null;
+                    if (currentSessionName === sessionName && (!currentWs || currentWs.readyState !== WebSocket.OPEN)) {
+                        connectTerminalWs(true);
+                    }
+                }, 2000);
+            } else {
+                term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n');
+            }
+        };
+    }
+
+    connectTerminalWs();
     term.onData((data) => { if (currentWs?.readyState === WebSocket.OPEN) currentWs.send(data); });
 
     term.focus();
@@ -2434,16 +2620,20 @@ function initTerminal(bodyEl, sessionName) {
 
     const ro = new ResizeObserver(() => {
         fitAddon.fit();
-        if (ws.readyState === WebSocket.OPEN) ws.send(`resize:${term.cols},${term.rows}`);
+        if (currentWs?.readyState === WebSocket.OPEN) currentWs.send(`resize:${term.cols},${term.rows}`);
     });
     ro.observe(bodyEl);
+    term.onDispose(() => {
+        clearTerminalTimers();
+        ro.disconnect();
+    });
     term.focus();
 }
 
 async function openNativeTerminal(sessionName) {
     if (!sessionName) return;
     try {
-        await authFetch(`/api/sessions/${encodeURIComponent(sessionName)}/open-terminal`, { method: 'POST' });
+        await apiCheck(await authFetch(`/api/sessions/${encodeURIComponent(sessionName)}/open-terminal`, { method: 'POST' }));
     } catch (e) {
         if (e.message !== 'Unauthorized') alert('Failed to open terminal: ' + e.message);
     }
@@ -2726,7 +2916,7 @@ async function jumpToBottom() {
 
     // 1. If tmux is in copy-mode, exit it
     if (currentSessionName) {
-        await authFetch(`/api/sessions/${encodeURIComponent(currentSessionName)}/scroll-bottom`, { method: 'POST' });
+        await authFetch(`/api/sessions/${encodeURIComponent(currentSessionName)}/scroll-bottom`, { method: 'POST' }).catch(() => {});
     }
 
     // 2. Send many PageDown keys to scroll any TUI app to bottom
@@ -3003,10 +3193,11 @@ function startApp() {
     if (savedProject === '') selectedProject = null;
 
     fetchAll().then(() => {
+        connectEvents();
         const savedSession = localStorage.getItem('tmux-open-session');
         const savedMode = localStorage.getItem('tmux-terminal-mode');
         if (savedSession) {
-            const exists = sessionsData.some(s => s.name === savedSession);
+            const exists = sessionsData.some(s => s.name === savedSession && s.alive);
             if (exists) {
                 if (savedMode === 'fullscreen') {
                     openTerminalInMode(savedSession, savedSession, 'fullscreen');
@@ -3025,19 +3216,7 @@ function startApp() {
 // Check auth then start
 checkAuth().then(authenticated => {
     if (authenticated) startApp();
+}).catch(err => {
+    console.error('startup failed:', err);
+    showStartupError(err);
 });
-
-setInterval(() => {
-    if (!authToken) return;
-    fetchAll();
-}, 5000);
-
-// Fetch GitHub star count
-fetch('https://api.github.com/repos/linwk20/tmux-kanban')
-    .then(r => { if (!r.ok) throw new Error(); return r.json(); })
-    .then(d => {
-        const n = d.stargazers_count;
-        const label = n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K' : n;
-        document.getElementById('github-stars').textContent = label + ' Stars';
-    })
-    .catch(() => { document.getElementById('github-stars').textContent = '?? Stars'; });

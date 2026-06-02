@@ -48,6 +48,8 @@
 
 **Agent 永远不掉线。** 每个会话都是真实的 `tmux attach-session`。你的 Agent 跑在持久化的 tmux 会话里。
 
+打开终端只会 attach 到已经运行中的 tmux session。如果 session 已停止，请先点 **Start Session**；终端视图不会偷偷创建一个同名的新 tmux session。
+
 **完整支持终端特性。** 我们完整支持 Claude Code、Codex、tmux 等工具所提供的各种终端能力。
 
 ### 2. 极简 —— 读得懂、改得动、完全属于你
@@ -134,6 +136,8 @@ tmux-kanban
 
 Agent hook 调用 `~/.tmux-kanban/alert-agent-needs-you.sh`（首次启动 `tmux-kanban` 时自动部署）。脚本自动检测当前 tmux session 名，通过专用的 `agent_token` 调用 kanban API。
 
+前端通过服务端推送的 `/ws/events` 事件流刷新，不再每隔几秒轮询。hook 或服务端状态变化会通知已打开的看板，看板随后刷新一次。
+
 ```
 Agent 需要批准
   → hook 触发 alert-agent-needs-you.sh
@@ -143,7 +147,7 @@ Agent 需要批准
   → 点击 "Done" → 高亮清除
 ```
 
-**Tailscale / 远程服务器**：在 agent 环境中设置 `TMUX_KANBAN_HOST=100.x.x.x`。脚本默认使用 `127.0.0.1:59235`。
+**Tailscale / 远程服务器**：在 agent 环境中设置 `TMUX_KANBAN_URL=http://100.x.x.x:59235`，或者 `http://machine-name.tailnet-name.ts.net:59235`。脚本默认使用 `http://127.0.0.1:59235`。
 
 ### OpenCode
 
@@ -155,16 +159,18 @@ cp tmux_kanban/static/tmux-kanban-plugin.js ~/.config/opencode/plugins/tmux-kanb
 
 或者放到项目目录 `.opencode/plugins/tmux-kanban.js`。
 
-重启 OpenCode，插件即生效。触发时机：
-- `permission.asked` — 任何权限提示（bash、edit、read 等）
-- `session.idle` — 会话空闲
-- `session.error` — agent 出错
+重启 OpenCode，插件即生效。OpenCode 会自动加载 `~/.config/opencode/plugins/` 和 `.opencode/plugins/` 中的插件；这个插件订阅：
+- `permission.asked` — 任务需要你做选择
+- `session.idle` — 任务本轮输出完成
+- `session.error` — 任务执行出错
 
-插件用 `$`（Bun shell）调用 `alert-agent-needs-you.sh`。脚本通过 `tmux display-message -p '#S'` 自动检测 tmux session 名，本地使用无需额外配置。
+插件用 OpenCode 的 `$`（Bun shell）立即调用 `alert-agent-needs-you.sh`，并用 3 秒去重避免重复通知。脚本通过 `tmux display-message -p '#S'` 自动检测 tmux session 名，本地使用无需额外配置。
 
-远程 kanban 访问时，在 shell profile（`.zshrc`/`.bashrc`）中设置：
+通过 Tailscale 访问远程 kanban 时，在 shell profile（`.zshrc`/`.bashrc`）中设置：
 ```bash
-export TMUX_KANBAN_HOST=100.xxx.xxx.xxx
+export TMUX_KANBAN_URL=http://100.xxx.xxx.xxx:59235
+# 或者：
+export TMUX_KANBAN_URL=http://machine-name.tailnet-name.ts.net:59235
 ```
 
 ### Claude Code
@@ -222,6 +228,9 @@ hooks:
 ```bash
 # 在 tmux session 内执行：
 ~/.tmux-kanban/alert-agent-needs-you.sh "PR 已准备好review"
+
+# 只刷新已打开的看板，不标记为需要关注：
+~/.tmux-kanban/notify-kanban.sh refresh "状态已变化"
 
 # 或者直接用 curl：
 TOKEN=$(cat ~/.tmux-kanban/agent-token)

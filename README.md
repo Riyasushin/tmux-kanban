@@ -51,6 +51,7 @@ In this version, I simply vibe-coded security in (see [Key Features](#-key-featu
 
 **Agents Never Disconnect.** Every session is a real `tmux attach-session`. Your agents run in persistent tmux sessions.
 
+Opening a terminal attaches to an already-running tmux session. If a session is stopped, use **Start Session** first; the terminal view will not silently create a new tmux session with that name.
 
 **All terminal features supported.** We fully support all the useful terminal features offered by tools like Claude Code, Codex, or Tmux.
 
@@ -151,6 +152,8 @@ When a coding agent (OpenCode, Claude Code, Kimi, Codex) asks for your permissio
 
 Agent hooks call `~/.tmux-kanban/alert-agent-needs-you.sh` (auto-deployed on first `tmux-kanban` run). The script auto-detects the tmux session name and pings the kanban API with a dedicated `agent_token`.
 
+Dashboards update through a server-pushed `/ws/events` stream. The frontend does not poll every few seconds; hooks and server-side state changes notify open dashboards, which then refresh once.
+
 ```
 Agent needs approval
   → hook fires alert-agent-needs-you.sh
@@ -160,7 +163,7 @@ Agent needs approval
   → click "Done" → orange glow clears
 ```
 
-**Tailscale / remote server**: set `TMUX_KANBAN_HOST=100.x.x.x` in your agent's environment. The script defaults to `127.0.0.1:59235`.
+**Tailscale / remote server**: set `TMUX_KANBAN_URL=http://100.x.x.x:59235` or `http://machine-name.tailnet-name.ts.net:59235` in your agent's environment. The script defaults to `http://127.0.0.1:59235`.
 
 ### OpenCode
 
@@ -172,16 +175,18 @@ cp tmux_kanban/static/tmux-kanban-plugin.js ~/.config/opencode/plugins/tmux-kanb
 
 Or for a single project, place it at `.opencode/plugins/tmux-kanban.js`.
 
-Restart OpenCode and the plugin is active. It fires on:
-- `permission.asked` — any permission prompt (bash, edit, read, etc.)
-- `session.idle` — round complete
-- `session.error` — agent error
+Restart OpenCode and the plugin is active. OpenCode loads local plugins from `~/.config/opencode/plugins/` and `.opencode/plugins/`, and this plugin subscribes to:
+- `permission.asked` — the task needs you to make a choice
+- `session.idle` — the task's current output is complete
+- `session.error` — the task hit an error
 
-The plugin uses the `$` Bun shell to call `alert-agent-needs-you.sh`. The script auto-detects your tmux session name via `tmux display-message -p '#S'`. No extra configuration needed for local use.
+The plugin uses OpenCode's `$` Bun shell to call `alert-agent-needs-you.sh` immediately, with a 3-second duplicate-notification guard. The script auto-detects your tmux session name via `tmux display-message -p '#S'`. No extra configuration needed for local use.
 
-For remote kanban access, set `TMUX_KANBAN_HOST` in your shell profile (`.zshrc`/`.bashrc`):
+For remote kanban access over Tailscale, set the kanban server URL in your shell profile (`.zshrc`/`.bashrc`):
 ```bash
-export TMUX_KANBAN_HOST=100.xxx.xxx.xxx
+export TMUX_KANBAN_URL=http://100.xxx.xxx.xxx:59235
+# or:
+export TMUX_KANBAN_URL=http://machine-name.tailnet-name.ts.net:59235
 ```
 
 ### Claude Code
@@ -239,6 +244,9 @@ hooks:
 ```bash
 # From inside a tmux session:
 ~/.tmux-kanban/alert-agent-needs-you.sh "PR ready for review"
+
+# Refresh open dashboards without marking the session as needing attention:
+~/.tmux-kanban/notify-kanban.sh refresh "status changed"
 
 # Or via curl directly:
 TOKEN=$(cat ~/.tmux-kanban/agent-token)
